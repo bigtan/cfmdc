@@ -1,0 +1,148 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: ${{ matrix.os }} - ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release]
+        include:
+          # Windows 配置
+          - os: windows-latest
+            triplet: x64-windows-static
+            vcpkg_cache_path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
+            generator: "Ninja"
+            cmake_args: "-DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER=clang-cl"
+            
+          # Linux 配置
+          - os: ubuntu-latest
+            triplet: x64-linux
+            vcpkg_cache_path: /home/runner/.cache/vcpkg/archives
+            generator: "Ninja"
+            cmake_args: "-DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang"
+
+    env:
+      VCPKG_BINARY_SOURCES: "clear;default,readwrite"
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    # ========================================================
+    # 1. 环境准备
+    # ========================================================
+    - name: Install Linux Dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config tar curl zip unzip clang lld
+
+    - name: Install Ninja (Windows)
+      if: runner.os == 'Windows'
+      run: choco install ninja
+
+    # [Windows 必需] 激活 MSVC 开发环境
+    - name: Setup MSVC
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+
+    # ========================================================
+    # 2. VCPKG 缓存与版本锁定
+    # ========================================================
+    - name: Create vcpkg cache directory
+      shell: bash
+      run: mkdir -p ${{ matrix.vcpkg_cache_path }}
+
+    - name: Restore vcpkg cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ github.workspace }}/build/vcpkg_installed
+          ${{ matrix.vcpkg_cache_path }}
+        # Exact key tracks manifest + baseline changes. Restore keys stay broader
+        # so a new baseline can still reuse compatible packages from older caches.
+        key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-
+
+    - name: Read vcpkg baseline from manifest config
+      id: vcpkg-baseline
+      shell: pwsh
+      run: |
+        $config = Get-Content vcpkg-configuration.json | ConvertFrom-Json
+        $baseline = $config.'default-registry'.baseline
+        if (-not $baseline) {
+          throw "Failed to read default-registry.baseline from vcpkg-configuration.json"
+        }
+        "commit=$baseline" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    - name: Pin vcpkg version
+      shell: bash
+      run: |
+        cd "$VCPKG_INSTALLATION_ROOT"
+        echo "Current vcpkg root: $VCPKG_INSTALLATION_ROOT"
+        git reset --hard
+        git fetch --all --quiet
+        echo "Switching vcpkg to commit: ${{ steps.vcpkg-baseline.outputs.commit }}"
+        git checkout ${{ steps.vcpkg-baseline.outputs.commit }}
+        
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          ./bootstrap-vcpkg.bat
+        else
+          ./bootstrap-vcpkg.sh
+        fi
+
+    # ========================================================
+    # 3. 配置 CMake (核心修改)
+    # ========================================================
+    - name: Configure CMake
+      shell: pwsh
+      run: >
+        cmake -B build -G Ninja
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        ${{ matrix.cmake_args }}
+
+    # ========================================================
+    # 4. 编译与测试
+    # ========================================================
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Test
+      working-directory: build
+      run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+    # ========================================================
+    # 5. 打包与上传产物
+    # ========================================================
+    - name: Package (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        mkdir -p dist
+        tar -czf dist/cfmdc-${{ github.ref_name }}-${{ matrix.triplet }}.tar.gz -C build/bin .
+
+    - name: Package (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        New-Item -ItemType Directory -Force -Path dist | Out-Null
+        Compress-Archive -Path build/bin/* -DestinationPath dist/cfmdc-${{ github.ref_name }}-${{ matrix.triplet }}.zip
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-${{ matrix.os }}-${{ matrix.triplet }}
+        path: dist/*
+        if-no-files-found: error
+        retention-days: 7

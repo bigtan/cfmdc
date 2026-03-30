@@ -1,0 +1,25 @@
+{
+  "dependencies": [
+    {
+      "name": "arrow",
+      "features": [
+        "filesystem",
+        "parquet"
+      ],
+      "platform": "staticcrt"
+    },
+    {
+      "name": "arrow",
+      "features": [
+        "filesystem",
+        "parquet",
+        "mimalloc"
+      ],
+      "platform": "!staticcrt"
+    },
+    "cxxopts",
+    "spdlog",
+    "tomlplusplus",
+    "catch2"
+  ]
+}

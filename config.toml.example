@@ -1,0 +1,61 @@
+# CTP Market Data Configuration (TOML)
+
+# Front server configuration
+# Support single server table or multiple server tables (array of tables)
+# When using multiple servers, the application will try them in order if connection fails
+
+# Example 1: Single server (backward compatible)
+# [Front]
+# MD_Url = "tcp://180.168.146.187:10131"
+# TD_Url = "tcp://180.168.146.187:10130"
+# BrokerID = "9999"
+# UserID = "your_user_id"
+# Password = "your_password"
+# UserProductInfo = "your_product_info"
+# AuthCode = "your_auth_code"
+# AppID = "your_app_id"
+# SubList = "null" # Instrument subscription list, use "|" as delimiter, "null" means subscribe all
+
+# Example 2: Multiple servers (recommended for production)
+[[Front]]
+MD_Url = "tcp://180.168.146.187:10131" # Primary market data front
+TD_Url = "tcp://180.168.146.187:10130" # Primary trading front
+BrokerID = "9999"
+UserID = "your_user_id"
+Password = "your_password"
+UserProductInfo = "your_product_info"
+AuthCode = "your_auth_code"
+AppID = "your_app_id"
+SubList = "null"
+
+[[Front]]
+MD_Url = "tcp://180.168.146.187:10211" # Backup market data front
+TD_Url = "tcp://180.168.146.187:10201" # Backup trading front
+BrokerID = "9999"
+UserID = "your_user_id"
+Password = "your_password"
+UserProductInfo = "your_product_info"
+AuthCode = "your_auth_code"
+AppID = "your_app_id"
+SubList = "null"
+
+[History]
+StorageMode = "Parquet" # Storage format: CSV, Parquet, or Hybrid
+
+# Storage paths for different formats (enabled based on StorageMode)
+# Placeholders supported:
+#   {tradingday} - Trading day in YYYYMMDD format
+#   {year}       - Year in YYYY format
+#   {month}      - Month in MM format
+#   {day}        - Day in DD format
+CSVPath = "./data/csv/{tradingday}" # Used when StorageMode is CSV or Hybrid
+ParquetPath = "./data/parquet/{tradingday}" # Used when StorageMode is Parquet or Hybrid
+
+# Examples of path patterns:
+# - "./data/csv/{tradingday}"           -> ./data/csv/20231011
+# - "./data/{year}/{month}/csv"         -> ./data/2023/10/csv
+# - "./data/{year}/csv/{tradingday}"    -> ./data/2023/csv/20231011
+
+[Application]
+InitTimeout = 60 # Initialization timeout in seconds (default: 60)
+FlowPath = "./flow" # CTP API flow file directory (default: "./flow")

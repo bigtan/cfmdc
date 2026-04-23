@@ -1,0 +1,149 @@
+name: Reusable Build
+
+on:
+  workflow_call:
+    inputs:
+      artifact_prefix:
+        description: Prefix used for uploaded artifact names.
+        required: true
+        type: string
+      retention_days:
+        description: Artifact retention period in days.
+        required: false
+        default: 7
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} - Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triplet: x64-linux
+            vcpkg_cache_path: /home/runner/.cache/vcpkg/archives
+            cmake_args: "-DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang"
+          - os: windows-latest
+            triplet: x64-windows-static
+            vcpkg_cache_path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
+            cmake_args: "-DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER=clang-cl"
+
+    env:
+      BUILD_TYPE: Release
+      VCPKG_BINARY_SOURCES: "clear;default,readwrite"
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config tar curl zip unzip clang lld
+
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+
+      - name: Setup MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Create vcpkg cache directory
+        shell: bash
+        run: mkdir -p ${{ matrix.vcpkg_cache_path }}
+
+      - name: Restore vcpkg cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ github.workspace }}/build/vcpkg_installed
+            ${{ matrix.vcpkg_cache_path }}
+          key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-
+
+      - name: Read vcpkg baseline
+        id: vcpkg-baseline
+        shell: pwsh
+        run: |
+          $config = Get-Content vcpkg-configuration.json | ConvertFrom-Json
+          $baseline = $config.'default-registry'.baseline
+          if (-not $baseline) {
+            throw "Failed to read default-registry.baseline from vcpkg-configuration.json"
+          }
+          "commit=$baseline" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Pin vcpkg version
+        shell: bash
+        run: |
+          cd "$VCPKG_INSTALLATION_ROOT"
+          echo "Current vcpkg root: $VCPKG_INSTALLATION_ROOT"
+          git reset --hard
+          git fetch --all --quiet
+          echo "Switching vcpkg to commit: ${{ steps.vcpkg-baseline.outputs.commit }}"
+          git checkout ${{ steps.vcpkg-baseline.outputs.commit }}
+
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            ./bootstrap-vcpkg.bat
+          else
+            ./bootstrap-vcpkg.sh
+          fi
+
+      - name: Configure CMake
+        shell: pwsh
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure
+
+      - name: Compute artifact ref
+        id: artifact-ref
+        shell: pwsh
+        run: |
+          $ref = if ($env:GITHUB_HEAD_REF) {
+            $env:GITHUB_HEAD_REF
+          } else {
+            $env:GITHUB_REF_NAME
+          }
+          $sanitized = $ref -replace '[^0-9A-Za-z._-]', '-'
+          if (-not $sanitized) {
+            throw "Failed to derive a sanitized artifact ref from '$ref'"
+          }
+          "value=$sanitized" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/cfmdc-${{ steps.artifact-ref.outputs.value }}-${{ matrix.triplet }}.tar.gz -C build/bin .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build/bin/* -DestinationPath dist/cfmdc-${{ steps.artifact-ref.outputs.value }}-${{ matrix.triplet }}.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ matrix.triplet }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}

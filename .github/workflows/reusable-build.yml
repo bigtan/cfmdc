@@ -101,7 +101,7 @@ jobs:
         shell: pwsh
         run: >
           cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
           ${{ matrix.cmake_args }}

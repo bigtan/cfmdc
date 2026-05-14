@@ -3,9 +3,11 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 
 #include "cfmdc/utils/Helpers.h"
 #include "cfmdc/utils/MarketDataTimePolicy.h"
@@ -16,7 +18,7 @@ namespace cfmdc
 AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                                    const std::string &trading_day, const std::string &base_action_day,
                                    const std::string &next_action_day, const std::string &startup_time_hms,
-                                   StorageMode mode)
+                                   StorageMode mode, int worker_core)
     : csv_path_(csv_path), parquet_path_(parquet_path), trading_day_(trading_day), action_day_base_(base_action_day),
       action_day_next_(next_action_day), storage_mode_(mode), stop_flag_(false)
 {
@@ -72,6 +74,42 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
                  window_str);
 
     worker_thread_ = std::thread(&AsyncFileManager::worker_loop, this);
+
+    // Apply thread affinity
+    int actual_core = worker_core;
+    unsigned int hardware_threads = std::thread::hardware_concurrency();
+
+    if (worker_core == -2)
+    {
+        // Auto-select core: skip core 0 if possible as it handles most interrupts
+        if (hardware_threads > 1)
+        {
+            actual_core = static_cast<int>(hardware_threads - 1); // Use the last core
+        }
+        else
+        {
+            actual_core = -1; // Single core, no affinity
+        }
+    }
+    else if (worker_core >= static_cast<int>(hardware_threads))
+    {
+        spdlog::warn("Configured WorkerThreadCore ({}) exceeds available hardware threads ({}), affinity disabled",
+                     worker_core, hardware_threads);
+        actual_core = -1;
+    }
+
+    if (actual_core >= 0)
+    {
+        if (set_thread_affinity(worker_thread_, actual_core))
+        {
+            spdlog::info("Worker thread pinned to CPU core: {} (mode: {})", actual_core,
+                         worker_core == -2 ? "auto" : "manual");
+        }
+        else
+        {
+            spdlog::warn("Failed to pin worker thread to CPU core: {}", actual_core);
+        }
+    }
 }
 
 AsyncFileManager::~AsyncFileManager()
@@ -202,7 +240,6 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
 
 void AsyncFileManager::worker_loop()
 {
-    CThostFtdcDepthMarketDataField data;
     using namespace std::chrono_literals;
 
     // Time-budgeted adaptive backoff with jitter to reduce CPU while keeping latency low.
@@ -211,6 +248,7 @@ void AsyncFileManager::worker_loop()
     constexpr auto kSleepMin = 50us;
     constexpr auto kSleepMax = 2000us;
     constexpr int kJitterPercent = 10;
+    constexpr size_t kBatchSize = 64;
 
     using clock = std::chrono::steady_clock;
     auto spin_deadline = clock::now() + kSpinBudget;
@@ -241,17 +279,22 @@ void AsyncFileManager::worker_loop()
         commit_processed_market_data(data);
     };
 
+    std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
+
     while (!stop_flag_.load(std::memory_order_acquire))
     {
-        bool processed_any = false;
-        while (queue_.try_dequeue(data))
+        size_t count = 0;
+        while (count < kBatchSize && queue_.try_dequeue(batch[count]))
         {
-            process_data(data);
-            processed_any = true;
+            count++;
         }
 
-        if (processed_any)
+        if (count > 0)
         {
+            for (size_t i = 0; i < count; ++i)
+            {
+                process_data(batch[i]);
+            }
             reset_backoff();
             continue;
         }
@@ -270,9 +313,11 @@ void AsyncFileManager::worker_loop()
         }
 
         std::this_thread::sleep_for(jittered_sleep(sleep_duration));
-        sleep_duration = std::min(sleep_duration * 2, kSleepMax);
+        sleep_duration = (std::min)(sleep_duration * 2, kSleepMax);
     }
+
     // Process remaining items
+    CThostFtdcDepthMarketDataField data;
     while (queue_.try_dequeue(data))
     {
         process_data(data);

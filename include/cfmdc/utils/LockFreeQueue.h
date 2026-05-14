@@ -74,7 +74,7 @@ template <typename T, size_t Size> class LockFreeQueue
   private:
     alignas(64) std::atomic<size_t> head_; // Consumer index (cache line aligned)
     alignas(64) std::atomic<size_t> tail_; // Producer index (cache line aligned)
-    T buffer_[Size];
+    alignas(64) T buffer_[Size];
 };
 
 } // namespace cfmdc

@@ -56,6 +56,10 @@ class Config
     /// @return Timeout value (default: 60 seconds)
     int init_timeout() const;
 
+    /// @brief Get CPU core for worker thread affinity (-1 for no affinity)
+    /// @return CPU core index or -1 (default: -1)
+    int worker_thread_core() const;
+
     /// @brief Get storage mode
     /// @return Storage mode (CSV, Parquet, or Hybrid)
     StorageMode storage_mode() const;

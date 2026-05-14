@@ -36,16 +36,16 @@ class AsyncFileManager
     explicit AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                               const std::string &trading_day, const std::string &base_action_day,
                               const std::string &next_action_day, const std::string &startup_time_hms,
-                              StorageMode mode);
+                              StorageMode mode, int worker_core = -1);
 
     /// @brief Destructor
     ~AsyncFileManager();
 
-    // Non-copyable but movable
+    // Non-copyable and non-movable due to std::atomic members in queue
     AsyncFileManager(const AsyncFileManager &) = delete;
     AsyncFileManager &operator=(const AsyncFileManager &) = delete;
-    AsyncFileManager(AsyncFileManager &&) = default;
-    AsyncFileManager &operator=(AsyncFileManager &&) = default;
+    AsyncFileManager(AsyncFileManager &&) = delete;
+    AsyncFileManager &operator=(AsyncFileManager &&) = delete;
 
     /// @brief Async write market data (lock-free, high-performance)
     /// @param data Market data to write

@@ -125,7 +125,13 @@ void Application::run()
         std::this_thread::sleep_for(SLEEP_DURATION);
     }
 
-    spdlog::info("Shutdown signal received, cleaning up...");
+    spdlog::info("Shutdown signal received, cleaning up SPIs and file managers...");
+    
+    // Explicitly reset in reverse order of initialization
+    md_spi_.reset();
+    trader_spi_.reset();
+
+    spdlog::info("Cleanup completed, exiting application.");
 }
 
 void Application::setup_file_limits()

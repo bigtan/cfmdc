@@ -59,3 +59,15 @@ ParquetPath = "./data/parquet/{tradingday}" # Used when StorageMode is Parquet o
 [Application]
 InitTimeout = 60 # Initialization timeout in seconds (default: 60)
 FlowPath = "./flow" # CTP API flow file directory (default: "./flow")
+
+# Worker thread CPU affinity (Thread Pinning)
+# This settings binds the high-performance async writer thread to a specific CPU core.
+# Options:
+#   -1      : Disable affinity (let OS decide, default)
+#   "auto"  : Automatically select the last available core (skips core 0 to avoid interrupts)
+#   0, 1... : Manually specify a core index
+#
+# Recommendations:
+#   - For VPS: Use "auto" to avoid core 0 which usually handles network interrupts.
+#   - For Physical Machines: Pin to a dedicated isolated core for lowest latency.
+WorkerThreadCore = "auto"

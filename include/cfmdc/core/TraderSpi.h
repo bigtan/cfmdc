@@ -32,7 +32,7 @@ class TraderSpi : public CThostFtdcTraderSpi
     explicit TraderSpi(const FrontServer &server, const std::filesystem::path &flow_path);
 
     /// @brief Destructor
-    ~TraderSpi() = default;
+    virtual ~TraderSpi();
 
     // Disable copy/move - API objects shouldn't be copied
     TraderSpi(const TraderSpi &) = delete;

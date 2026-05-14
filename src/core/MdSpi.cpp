@@ -20,7 +20,15 @@ MdSpi::MdSpi(const FrontServer &server, const Config &config, const std::filesys
 
 MdSpi::~MdSpi()
 {
-    spdlog::info("MdSpi destructor called - stopping async file manager...");
+    spdlog::info("MdSpi destructor called - stopping API and async file manager...");
+    
+    // 1. Unregister SPI immediately to stop receiving callbacks
+    if (md_api_)
+    {
+        md_api_->RegisterSpi(nullptr);
+    }
+
+    // 2. Stop and flush the file manager
     if (async_file_manager_)
     {
         async_file_manager_->stop();
@@ -62,8 +70,9 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
 
     // Initialize async file manager with lock-free queue for high-frequency trading
     // Re-initialization is safe here as this is called before subscription
-    async_file_manager_ = std::make_unique<AsyncFileManager>(csv_path, parquet_path, trading_day_, action_day_base_,
-                                                             action_day_next_, startup_time_hms, storage_mode);
+    async_file_manager_ = std::make_unique<AsyncFileManager>(
+        csv_path, parquet_path, trading_day_, action_day_base_, action_day_next_, startup_time_hms, storage_mode,
+        config_.worker_thread_core());
 }
 
 void MdSpi::OnFrontConnected()

@@ -15,7 +15,7 @@ namespace cfmdc
 constexpr int DEFAULT_REQUEST_ID = 0;
 constexpr int FILE_HANDLE_LIMIT = 2048;
 constexpr auto SLEEP_DURATION = std::chrono::milliseconds(1000);
-constexpr double INVALID_PRICE = std::numeric_limits<double>::max();
+constexpr double INVALID_PRICE = (std::numeric_limits<double>::max)();
 constexpr std::string_view APP_VERSION = CFMDC_VERSION;
 
 // File paths

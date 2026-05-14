@@ -271,6 +271,29 @@ int Config::init_timeout() const
     return 60;
 }
 
+int Config::worker_thread_core() const
+{
+    // Default is -1 (no affinity)
+    if (auto app = config_["Application"].as_table())
+    {
+        auto node = (*app)["WorkerThreadCore"];
+        if (node.is_string())
+        {
+            std::string val = *node.value<std::string>();
+            std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) { return std::tolower(c); });
+            if (val == "auto")
+            {
+                return -2; // Sentinel for auto
+            }
+        }
+        else if (auto core = node.value<int64_t>())
+        {
+            return static_cast<int>(*core);
+        }
+    }
+    return -1;
+}
+
 StorageMode Config::storage_mode() const
 {
     // Default to CSV if not specified

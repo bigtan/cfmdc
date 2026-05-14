@@ -31,7 +31,7 @@ class MdSpi : public CThostFtdcMdSpi
     explicit MdSpi(const FrontServer &server, const Config &config, const std::filesystem::path &flow_path);
 
     /// @brief Destructor
-    ~MdSpi();
+    virtual ~MdSpi();
 
     // Disable copy/move - API objects shouldn't be copied
     MdSpi(const MdSpi &) = delete;

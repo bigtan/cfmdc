@@ -65,6 +65,9 @@ class CsvWriter
 
     // File handles
     std::unordered_map<std::string, std::unique_ptr<std::ofstream>> file_handles_;
+
+    // Pre-allocated string buffer for formatting
+    std::string csv_buffer_;
 };
 
 } // namespace cfmdc

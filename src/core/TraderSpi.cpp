@@ -16,6 +16,15 @@ TraderSpi::TraderSpi(const FrontServer &server, const std::filesystem::path &flo
     spdlog::info("TraderSpi initialized with front: {}, flow path: {}", server_.td_url(), flow_path.string());
 }
 
+TraderSpi::~TraderSpi()
+{
+    spdlog::info("TraderSpi destructor called - unregistering API SPI...");
+    if (trader_api_)
+    {
+        trader_api_->RegisterSpi(nullptr);
+    }
+}
+
 void TraderSpi::init()
 {
     trader_api_->Init();

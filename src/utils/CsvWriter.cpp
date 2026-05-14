@@ -12,6 +12,8 @@ namespace cfmdc
 CsvWriter::CsvWriter(const std::filesystem::path &base_path, const std::string &trading_day)
     : base_path_(base_path), trading_day_(trading_day)
 {
+    // Reserve space for a typical CSV line (~500 bytes) to avoid reallocations
+    csv_buffer_.reserve(1024);
     spdlog::info("CsvWriter initialized: base_path={}, trading_day={}", base_path_.string(), trading_day_);
 }
 
@@ -30,7 +32,10 @@ bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
         return false;
     }
 
-    auto csv_line = std::format(
+    // Clear and reuse buffer to minimize allocations
+    csv_buffer_.clear();
+    std::format_to(
+        std::back_inserter(csv_buffer_),
         "{},{},{},{},{},{},{},{},{},{},{},{:.0f},{},{},{},{},{},{},{},{},"
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         data.TradingDay, data.InstrumentID, data.ExchangeID, clean_price(data.LastPrice),
@@ -45,7 +50,7 @@ bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
         clean_price(data.AskPrice4), data.AskVolume4, clean_price(data.BidPrice5), data.BidVolume5,
         clean_price(data.AskPrice5), data.AskVolume5, clean_price(data.AveragePrice), data.ActionDay);
 
-    *file << csv_line << '\n';
+    *file << csv_buffer_ << '\n';
     return true;
 }
 

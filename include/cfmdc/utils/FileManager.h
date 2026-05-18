@@ -5,7 +5,9 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "IMarketDataWriter.h"
 #include "ThostFtdcUserApiStruct.h"
 #include "cfmdc/types/StorageMode.h"
 #include "cfmdc/utils/CsvWriter.h"
@@ -104,6 +106,9 @@ class AsyncFileManager
 #ifdef CFMDC_ENABLE_PARQUET
     std::unique_ptr<ParquetBatchWriter> parquet_writer_;
 #endif
+    // Storage writers
+    std::vector<IMarketDataWriter*> writers_;
+
     // Lock-free queue
     static constexpr size_t LOCKFREE_QUEUE_SIZE = 16384; // Must be power of 2
     LockFreeQueue<CThostFtdcDepthMarketDataField, LOCKFREE_QUEUE_SIZE> queue_;

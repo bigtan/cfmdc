@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "IMarketDataWriter.h"
 #include "ThostFtdcUserApiStruct.h"
 
 namespace cfmdc
@@ -15,7 +16,7 @@ namespace cfmdc
 /// @details Manages CSV file handles and writes market data in CSV format
 /// @thread_safety Not thread-safe. Should be used from a single thread or with
 /// external synchronization
-class CsvWriter
+class CsvWriter : public IMarketDataWriter
 {
   public:
     /// @brief Create CSV writer
@@ -24,7 +25,7 @@ class CsvWriter
     explicit CsvWriter(const std::filesystem::path &base_path, const std::string &trading_day);
 
     /// @brief Destructor - closes all open files
-    ~CsvWriter();
+    ~CsvWriter() override;
 
     // Non-copyable but movable
     CsvWriter(const CsvWriter &) = delete;
@@ -35,13 +36,13 @@ class CsvWriter
     /// @brief Write market data to CSV file
     /// @param data Market data to write
     /// @return true if written successfully, false otherwise
-    bool write(const CThostFtdcDepthMarketDataField &data);
+    bool write(const CThostFtdcDepthMarketDataField &data) override;
+
+    /// @brief Flush all open files
+    void flush() override;
 
     /// @brief Close all open files
     void close_all();
-
-    /// @brief Flush all open files
-    void flush_all();
 
     /// @brief Get number of open CSV files
     size_t file_count() const

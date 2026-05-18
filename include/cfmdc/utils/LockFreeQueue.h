@@ -30,12 +30,25 @@ template <typename T, size_t Size> class LockFreeQueue
 
         if (next_tail == head_.load(std::memory_order_acquire))
         {
+            overflow_count_.fetch_add(1, std::memory_order_relaxed);
             return false; // Queue is full
         }
 
         buffer_[current_tail] = item;
         tail_.store(next_tail, std::memory_order_release);
         return true;
+    }
+
+    /// @brief Get total number of overflow events
+    size_t overflow_count() const noexcept
+    {
+        return overflow_count_.load(std::memory_order_relaxed);
+    }
+
+    /// @brief Reset overflow counter
+    void reset_overflow_count() noexcept
+    {
+        overflow_count_.store(0, std::memory_order_relaxed);
     }
 
     /// @brief Try to dequeue an item (consumer side)
@@ -75,6 +88,7 @@ template <typename T, size_t Size> class LockFreeQueue
     alignas(64) std::atomic<size_t> head_; // Consumer index (cache line aligned)
     alignas(64) std::atomic<size_t> tail_; // Producer index (cache line aligned)
     alignas(64) T buffer_[Size];
+    std::atomic<size_t> overflow_count_{0};
 };
 
 } // namespace cfmdc

@@ -590,7 +590,7 @@ bool ParquetBatchWriter::write(const CThostFtdcDepthMarketDataField &data)
     }
 }
 
-void ParquetBatchWriter::flush_all()
+void ParquetBatchWriter::flush()
 {
     try
     {

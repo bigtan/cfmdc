@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "IMarketDataWriter.h"
 #include "ThostFtdcUserApiStruct.h"
 
 namespace cfmdc
@@ -85,7 +86,7 @@ class ParquetMarketDataWriter
 
 /// @brief Batch writer for multiple instruments
 /// @details Writes all instruments to a single Parquet file
-class ParquetBatchWriter
+class ParquetBatchWriter : public IMarketDataWriter
 {
   public:
     /// @brief Create batch writer
@@ -95,7 +96,7 @@ class ParquetBatchWriter
     explicit ParquetBatchWriter(const std::filesystem::path &base_path, const std::string &trading_day,
                                 const ParquetMarketDataWriter::Config &config = ParquetMarketDataWriter::Config{});
 
-    ~ParquetBatchWriter();
+    ~ParquetBatchWriter() override;
 
     // Non-copyable, movable
     ParquetBatchWriter(const ParquetBatchWriter &) = delete;
@@ -106,10 +107,10 @@ class ParquetBatchWriter
     /// @brief Write market data (all instruments to single file)
     /// @param data Market data to write
     /// @return true if successful, false otherwise
-    bool write(const CThostFtdcDepthMarketDataField &data);
+    bool write(const CThostFtdcDepthMarketDataField &data) override;
 
     /// @brief Flush writer
-    void flush_all();
+    void flush() override;
 
     /// @brief Close writer
     void close_all();

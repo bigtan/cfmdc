@@ -66,7 +66,7 @@ void CsvWriter::close_all()
     file_handles_.clear();
 }
 
-void CsvWriter::flush_all()
+void CsvWriter::flush()
 {
     for (auto &[instrument_id, file] : file_handles_)
     {

@@ -34,6 +34,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     if (mode == StorageMode::CSV || mode == StorageMode::HYBRID)
     {
         csv_writer_ = std::make_unique<CsvWriter>(csv_path, trading_day);
+        writers_.push_back(csv_writer_.get());
         spdlog::info("CSV writer initialized at path: {}", csv_path.string());
     }
 
@@ -47,6 +48,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         config.row_group_size = 100000;
 
         parquet_writer_ = std::make_unique<ParquetBatchWriter>(parquet_path, trading_day, config);
+        writers_.push_back(parquet_writer_.get());
         spdlog::info("Parquet writer initialized at path: {} with ZSTD compression", parquet_path.string());
     }
 #else
@@ -57,6 +59,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         if (!csv_writer_)
         {
             csv_writer_ = std::make_unique<CsvWriter>(csv_path, trading_day);
+            writers_.push_back(csv_writer_.get());
             spdlog::info("CSV writer initialized at path: {}", csv_path.string());
         }
     }
@@ -161,18 +164,9 @@ bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data)
 void AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDataField &data)
 {
     // Write based on storage mode
-    if (storage_mode_ == StorageMode::CSV)
+    for (auto *writer : writers_)
     {
-        write_market_data_to_csv(data);
-    }
-    else if (storage_mode_ == StorageMode::PARQUET)
-    {
-        write_market_data_to_parquet(data);
-    }
-    else
-    { // HYBRID
-        write_market_data_to_csv(data);
-        write_market_data_to_parquet(data);
+        writer->write(data);
     }
 }
 
@@ -208,17 +202,10 @@ void AsyncFileManager::close_all()
 
 void AsyncFileManager::flush_all()
 {
-    if (csv_writer_)
+    for (auto *writer : writers_)
     {
-        csv_writer_->flush_all();
+        writer->flush();
     }
-
-#ifdef CFMDC_ENABLE_PARQUET
-    if (parquet_writer_)
-    {
-        parquet_writer_->flush_all();
-    }
-#endif
 }
 
 AsyncFileManager::Statistics AsyncFileManager::get_statistics() const

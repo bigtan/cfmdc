@@ -24,7 +24,6 @@ class ParquetMarketDataWriter
     /// @brief Configuration for Parquet writer
     struct Config
     {
-        size_t batch_size;       ///< Number of records to buffer before flush
         std::string compression; ///< Compression: snappy, gzip, zstd, lz4
         int compression_level;   ///< Compression level (-1 = default)
         size_t row_group_size;   ///< Rows per row group
@@ -33,8 +32,8 @@ class ParquetMarketDataWriter
 
         /// @brief Constructor with default values
         Config()
-            : batch_size(10000), compression("snappy"), compression_level(-1), row_group_size(200000),
-              use_dictionary(true), writer_version(2)
+            : compression("snappy"), compression_level(-1), row_group_size(200000), use_dictionary(true),
+              writer_version(2)
         {
         }
     };
@@ -74,14 +73,12 @@ class ParquetMarketDataWriter
     void initialize_schema();
     void append_to_buffer(const CThostFtdcDepthMarketDataField &data);
     void flush_buffer();
-    void write_accumulated_tables();
 
     class Impl;
     std::unique_ptr<Impl> impl_;
 
     Config config_;
     size_t record_count_{0};
-    size_t buffer_index_{0};
 };
 
 /// @brief Batch writer for multiple instruments

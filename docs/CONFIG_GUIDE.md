@@ -106,12 +106,13 @@ CTP 流文件路径，默认 `./flow`。若目录不存在会自动创建。
 
 ## 6. 当前未启用的配置
 
-代码当前未读取日志配置或 Parquet 参数（压缩、批量大小等）。
+代码当前未读取日志配置或 Parquet 参数（压缩、row group 大小等）。
 当前 Parquet 默认值定义在 `src/utils/FileManager.cpp`：
 
 - `compression = "zstd"`
 - `compression_level = 3`
-- `batch_size = 10000`
 - `row_group_size = 100000`
+
+Parquet 写入按 `row_group_size` 缓冲并写出 row group。
 
 如需调整，请修改该文件中的 `ParquetMarketDataWriter::Config` 初始化逻辑。

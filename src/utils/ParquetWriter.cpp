@@ -3,20 +3,36 @@
 #ifdef CFMDC_ENABLE_PARQUET
 
 #include <arrow/api.h>
-#include <arrow/compute/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/exception.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <format>
 
 #include "cfmdc/utils/Helpers.h"
 
 namespace cfmdc
 {
+
+namespace
+{
+
+struct MarketDataStringLengths
+{
+    int32_t trading_day{0};
+    int32_t instrument_id{0};
+    int32_t exchange_id{0};
+    int32_t update_time{0};
+    int32_t action_day{0};
+};
+
+} // namespace
 
 // Implementation class to hide Arrow/Parquet details
 class ParquetMarketDataWriter::Impl
@@ -58,9 +74,9 @@ class ParquetMarketDataWriter::Impl
     arrow::DoubleBuilder average_price_builder;
     arrow::StringBuilder action_day_builder;
 
-    // Accumulated tables for forming row groups
-    std::vector<std::shared_ptr<arrow::Table>> accumulated_tables;
-    size_t accumulated_rows{0};
+    // Row-group buffer. write() only copies rows here; Arrow builders are touched in flush_buffer().
+    std::vector<CThostFtdcDepthMarketDataField> row_buffer;
+    std::vector<MarketDataStringLengths> string_lengths;
 };
 
 ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &file_path, const Config &config)
@@ -68,6 +84,9 @@ ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &fi
 {
     try
     {
+        impl_->row_buffer.reserve(std::max<size_t>(1, config_.row_group_size));
+        impl_->string_lengths.reserve(std::max<size_t>(1, config_.row_group_size));
+
         // Create schema
         initialize_schema();
 
@@ -134,8 +153,8 @@ ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &fi
         }
         impl_->writer = std::move(*writer_result);
 
-        spdlog::info("Parquet writer created: {}, compression: {}, batch_size: {}", file_path.string(),
-                     config_.compression, config_.batch_size);
+        spdlog::info("Parquet writer created: {}, compression: {}, row_group_size: {}", file_path.string(),
+                     config_.compression, config_.row_group_size);
     }
     catch (const std::exception &ex)
     {
@@ -220,10 +239,9 @@ bool ParquetMarketDataWriter::write(const CThostFtdcDepthMarketDataField &data)
     {
         append_to_buffer(data);
         record_count_++;
-        buffer_index_++;
 
-        // Flush when buffer is full
-        if (buffer_index_ >= config_.batch_size)
+        // Flush one row group at a time to avoid building and concatenating many small tables.
+        if (impl_->row_buffer.size() >= std::max<size_t>(1, config_.row_group_size))
         {
             flush_buffer();
         }
@@ -239,175 +257,154 @@ bool ParquetMarketDataWriter::write(const CThostFtdcDepthMarketDataField &data)
 
 void ParquetMarketDataWriter::append_to_buffer(const CThostFtdcDepthMarketDataField &data)
 {
-    // Append to each builder
-    auto status = impl_->trading_day_builder.Append(data.TradingDay);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append TradingDay");
-
-    status = impl_->instrument_id_builder.Append(data.InstrumentID);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append InstrumentID");
-
-    status = impl_->exchange_id_builder.Append(data.ExchangeID);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append ExchangeID");
-
-    status = impl_->last_price_builder.Append(clean_price(data.LastPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append LastPrice");
-
-    status = impl_->pre_settlement_price_builder.Append(clean_price(data.PreSettlementPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append PreSettlementPrice");
-
-    status = impl_->pre_close_price_builder.Append(clean_price(data.PreClosePrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append PreClosePrice");
-
-    status = impl_->pre_open_interest_builder.Append(data.PreOpenInterest);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append PreOpenInterest");
-
-    status = impl_->open_price_builder.Append(clean_price(data.OpenPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append OpenPrice");
-
-    status = impl_->highest_price_builder.Append(clean_price(data.HighestPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append HighestPrice");
-
-    status = impl_->lowest_price_builder.Append(clean_price(data.LowestPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append LowestPrice");
-
-    status = impl_->volume_builder.Append(data.Volume);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append Volume");
-
-    status = impl_->turnover_builder.Append(clean_price(data.Turnover));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append Turnover");
-
-    status = impl_->open_interest_builder.Append(data.OpenInterest);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append OpenInterest");
-
-    status = impl_->close_price_builder.Append(clean_price(data.ClosePrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append ClosePrice");
-
-    status = impl_->settlement_price_builder.Append(clean_price(data.SettlementPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append SettlementPrice");
-
-    status = impl_->upper_limit_price_builder.Append(clean_price(data.UpperLimitPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append UpperLimitPrice");
-
-    status = impl_->lower_limit_price_builder.Append(clean_price(data.LowerLimitPrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append LowerLimitPrice");
-
-    status = impl_->pre_delta_builder.Append(clean_price(data.PreDelta));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append PreDelta");
-
-    status = impl_->curr_delta_builder.Append(clean_price(data.CurrDelta));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append CurrDelta");
-
-    status = impl_->update_time_builder.Append(data.UpdateTime);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append UpdateTime");
-
-    status = impl_->update_millisec_builder.Append(data.UpdateMillisec);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append UpdateMillisec");
-
-    // Five levels of bid/ask
-    const double *bid_prices[] = {&data.BidPrice1, &data.BidPrice2, &data.BidPrice3, &data.BidPrice4, &data.BidPrice5};
-    const int *bid_volumes[] = {&data.BidVolume1, &data.BidVolume2, &data.BidVolume3, &data.BidVolume4,
-                                &data.BidVolume5};
-    const double *ask_prices[] = {&data.AskPrice1, &data.AskPrice2, &data.AskPrice3, &data.AskPrice4, &data.AskPrice5};
-    const int *ask_volumes[] = {&data.AskVolume1, &data.AskVolume2, &data.AskVolume3, &data.AskVolume4,
-                                &data.AskVolume5};
-
-    for (int i = 0; i < 5; ++i)
-    {
-        status = impl_->bid_price_builders[i].Append(clean_price(*bid_prices[i]));
-        if (!status.ok())
-            throw std::runtime_error("Failed to append BidPrice");
-
-        status = impl_->bid_volume_builders[i].Append(*bid_volumes[i]);
-        if (!status.ok())
-            throw std::runtime_error("Failed to append BidVolume");
-
-        status = impl_->ask_price_builders[i].Append(clean_price(*ask_prices[i]));
-        if (!status.ok())
-            throw std::runtime_error("Failed to append AskPrice");
-
-        status = impl_->ask_volume_builders[i].Append(*ask_volumes[i]);
-        if (!status.ok())
-            throw std::runtime_error("Failed to append AskVolume");
-    }
-
-    status = impl_->average_price_builder.Append(clean_price(data.AveragePrice));
-    if (!status.ok())
-        throw std::runtime_error("Failed to append AveragePrice");
-
-    status = impl_->action_day_builder.Append(data.ActionDay);
-    if (!status.ok())
-        throw std::runtime_error("Failed to append ActionDay");
-}
-
-void ParquetMarketDataWriter::write_accumulated_tables()
-{
-    if (impl_->accumulated_rows == 0)
-    {
-        return; // Nothing to write
-    }
-
-    try
-    {
-        // Concatenate all accumulated tables
-        auto concat_result = arrow::ConcatenateTables(impl_->accumulated_tables);
-        if (!concat_result.ok())
-        {
-            throw std::runtime_error("Failed to concatenate tables: " + concat_result.status().ToString());
-        }
-        auto combined_table = *concat_result;
-
-        // Write the combined table as one row group
-        auto status = impl_->writer->WriteTable(*combined_table, combined_table->num_rows());
-        if (!status.ok())
-        {
-            throw std::runtime_error("Failed to write table: " + status.ToString());
-        }
-
-        spdlog::info("Wrote row group with {} records", combined_table->num_rows());
-
-        // Clear accumulated tables
-        impl_->accumulated_tables.clear();
-        impl_->accumulated_rows = 0;
-    }
-    catch (const std::exception &ex)
-    {
-        spdlog::error("Failed to write accumulated tables: {}", ex.what());
-        throw;
-    }
+    impl_->row_buffer.push_back(data);
 }
 
 void ParquetMarketDataWriter::flush_buffer()
 {
-    if (buffer_index_ == 0)
+    auto &rows = impl_->row_buffer;
+    if (rows.empty())
     {
         return; // Nothing to flush
     }
 
     try
     {
+        const auto row_count = static_cast<int64_t>(rows.size());
+        int64_t trading_day_bytes = 0;
+        int64_t instrument_id_bytes = 0;
+        int64_t exchange_id_bytes = 0;
+        int64_t update_time_bytes = 0;
+        int64_t action_day_bytes = 0;
+
+        impl_->string_lengths.resize(rows.size());
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            const auto &row = rows[i];
+            auto &lengths = impl_->string_lengths[i];
+
+            lengths.trading_day = static_cast<int32_t>(std::strlen(row.TradingDay));
+            lengths.instrument_id = static_cast<int32_t>(std::strlen(row.InstrumentID));
+            lengths.exchange_id = static_cast<int32_t>(std::strlen(row.ExchangeID));
+            lengths.update_time = static_cast<int32_t>(std::strlen(row.UpdateTime));
+            lengths.action_day = static_cast<int32_t>(std::strlen(row.ActionDay));
+
+            trading_day_bytes += lengths.trading_day;
+            instrument_id_bytes += lengths.instrument_id;
+            exchange_id_bytes += lengths.exchange_id;
+            update_time_bytes += lengths.update_time;
+            action_day_bytes += lengths.action_day;
+        }
+
+#define CHECK_STATUS(expr)                                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        auto status = (expr);                                                                                          \
+        if (!status.ok())                                                                                              \
+        {                                                                                                              \
+            throw std::runtime_error(status.ToString());                                                               \
+        }                                                                                                              \
+    } while (0)
+
+#define RESERVE_BUILDER(builder) CHECK_STATUS((builder).Reserve(row_count))
+#define RESERVE_STRING_BUILDER(builder, bytes)                                                                         \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        CHECK_STATUS((builder).Reserve(row_count));                                                                    \
+        CHECK_STATUS((builder).ReserveData(bytes));                                                                    \
+    } while (0)
+
+        RESERVE_STRING_BUILDER(impl_->trading_day_builder, trading_day_bytes);
+        RESERVE_STRING_BUILDER(impl_->instrument_id_builder, instrument_id_bytes);
+        RESERVE_STRING_BUILDER(impl_->exchange_id_builder, exchange_id_bytes);
+        RESERVE_BUILDER(impl_->last_price_builder);
+        RESERVE_BUILDER(impl_->pre_settlement_price_builder);
+        RESERVE_BUILDER(impl_->pre_close_price_builder);
+        RESERVE_BUILDER(impl_->pre_open_interest_builder);
+        RESERVE_BUILDER(impl_->open_price_builder);
+        RESERVE_BUILDER(impl_->highest_price_builder);
+        RESERVE_BUILDER(impl_->lowest_price_builder);
+        RESERVE_BUILDER(impl_->volume_builder);
+        RESERVE_BUILDER(impl_->turnover_builder);
+        RESERVE_BUILDER(impl_->open_interest_builder);
+        RESERVE_BUILDER(impl_->close_price_builder);
+        RESERVE_BUILDER(impl_->settlement_price_builder);
+        RESERVE_BUILDER(impl_->upper_limit_price_builder);
+        RESERVE_BUILDER(impl_->lower_limit_price_builder);
+        RESERVE_BUILDER(impl_->pre_delta_builder);
+        RESERVE_BUILDER(impl_->curr_delta_builder);
+        RESERVE_STRING_BUILDER(impl_->update_time_builder, update_time_bytes);
+        RESERVE_BUILDER(impl_->update_millisec_builder);
+
+        for (int i = 0; i < 5; ++i)
+        {
+            RESERVE_BUILDER(impl_->bid_price_builders[i]);
+            RESERVE_BUILDER(impl_->bid_volume_builders[i]);
+            RESERVE_BUILDER(impl_->ask_price_builders[i]);
+            RESERVE_BUILDER(impl_->ask_volume_builders[i]);
+        }
+
+        RESERVE_BUILDER(impl_->average_price_builder);
+        RESERVE_STRING_BUILDER(impl_->action_day_builder, action_day_bytes);
+
+#undef RESERVE_STRING_BUILDER
+#undef RESERVE_BUILDER
+
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            const auto &row = rows[i];
+            const auto &lengths = impl_->string_lengths[i];
+
+            CHECK_STATUS(impl_->trading_day_builder.Append(row.TradingDay, lengths.trading_day));
+            CHECK_STATUS(impl_->instrument_id_builder.Append(row.InstrumentID, lengths.instrument_id));
+            CHECK_STATUS(impl_->exchange_id_builder.Append(row.ExchangeID, lengths.exchange_id));
+            impl_->last_price_builder.UnsafeAppend(clean_price(row.LastPrice));
+            impl_->pre_settlement_price_builder.UnsafeAppend(clean_price(row.PreSettlementPrice));
+            impl_->pre_close_price_builder.UnsafeAppend(clean_price(row.PreClosePrice));
+            impl_->pre_open_interest_builder.UnsafeAppend(row.PreOpenInterest);
+            impl_->open_price_builder.UnsafeAppend(clean_price(row.OpenPrice));
+            impl_->highest_price_builder.UnsafeAppend(clean_price(row.HighestPrice));
+            impl_->lowest_price_builder.UnsafeAppend(clean_price(row.LowestPrice));
+            impl_->volume_builder.UnsafeAppend(row.Volume);
+            impl_->turnover_builder.UnsafeAppend(clean_price(row.Turnover));
+            impl_->open_interest_builder.UnsafeAppend(row.OpenInterest);
+            impl_->close_price_builder.UnsafeAppend(clean_price(row.ClosePrice));
+            impl_->settlement_price_builder.UnsafeAppend(clean_price(row.SettlementPrice));
+            impl_->upper_limit_price_builder.UnsafeAppend(clean_price(row.UpperLimitPrice));
+            impl_->lower_limit_price_builder.UnsafeAppend(clean_price(row.LowerLimitPrice));
+            impl_->pre_delta_builder.UnsafeAppend(clean_price(row.PreDelta));
+            impl_->curr_delta_builder.UnsafeAppend(clean_price(row.CurrDelta));
+            CHECK_STATUS(impl_->update_time_builder.Append(row.UpdateTime, lengths.update_time));
+            impl_->update_millisec_builder.UnsafeAppend(row.UpdateMillisec);
+
+            impl_->bid_price_builders[0].UnsafeAppend(clean_price(row.BidPrice1));
+            impl_->bid_volume_builders[0].UnsafeAppend(row.BidVolume1);
+            impl_->ask_price_builders[0].UnsafeAppend(clean_price(row.AskPrice1));
+            impl_->ask_volume_builders[0].UnsafeAppend(row.AskVolume1);
+            impl_->bid_price_builders[1].UnsafeAppend(clean_price(row.BidPrice2));
+            impl_->bid_volume_builders[1].UnsafeAppend(row.BidVolume2);
+            impl_->ask_price_builders[1].UnsafeAppend(clean_price(row.AskPrice2));
+            impl_->ask_volume_builders[1].UnsafeAppend(row.AskVolume2);
+            impl_->bid_price_builders[2].UnsafeAppend(clean_price(row.BidPrice3));
+            impl_->bid_volume_builders[2].UnsafeAppend(row.BidVolume3);
+            impl_->ask_price_builders[2].UnsafeAppend(clean_price(row.AskPrice3));
+            impl_->ask_volume_builders[2].UnsafeAppend(row.AskVolume3);
+            impl_->bid_price_builders[3].UnsafeAppend(clean_price(row.BidPrice4));
+            impl_->bid_volume_builders[3].UnsafeAppend(row.BidVolume4);
+            impl_->ask_price_builders[3].UnsafeAppend(clean_price(row.AskPrice4));
+            impl_->ask_volume_builders[3].UnsafeAppend(row.AskVolume4);
+            impl_->bid_price_builders[4].UnsafeAppend(clean_price(row.BidPrice5));
+            impl_->bid_volume_builders[4].UnsafeAppend(row.BidVolume5);
+            impl_->ask_price_builders[4].UnsafeAppend(clean_price(row.AskPrice5));
+            impl_->ask_volume_builders[4].UnsafeAppend(row.AskVolume5);
+
+            impl_->average_price_builder.UnsafeAppend(clean_price(row.AveragePrice));
+            CHECK_STATUS(impl_->action_day_builder.Append(row.ActionDay, lengths.action_day));
+        }
+
         // Finish all builders and create arrays
         std::vector<std::shared_ptr<arrow::Array>> arrays;
+        arrays.reserve(impl_->schema->num_fields());
 
         std::shared_ptr<arrow::Array> array;
 
@@ -418,6 +415,10 @@ void ParquetMarketDataWriter::flush_buffer()
         if (!result.ok())                                                                                              \
         {                                                                                                              \
             throw std::runtime_error(result.status().ToString());                                                      \
+        }                                                                                                              \
+        if ((*result)->length() != row_count)                                                                          \
+        {                                                                                                              \
+            throw std::runtime_error("Unexpected Arrow array length after finishing builder");                         \
         }                                                                                                              \
         arrays.push_back(*result);                                                                                     \
     } while (0)
@@ -456,25 +457,21 @@ void ParquetMarketDataWriter::flush_buffer()
         FINISH_BUILDER(impl_->action_day_builder);
 
 #undef FINISH_BUILDER
+#undef CHECK_STATUS
 
         // Create table from arrays
         auto table = arrow::Table::Make(impl_->schema, arrays);
-        size_t batch_rows = arrays[0]->length();
 
-        // Accumulate tables until we reach row_group_size
-        impl_->accumulated_tables.push_back(table);
-        impl_->accumulated_rows += batch_rows;
-
-        spdlog::debug("Accumulated {} records (total: {} / {})", batch_rows, impl_->accumulated_rows,
-                      config_.row_group_size);
-
-        // Write when accumulated rows reach row_group_size
-        if (impl_->accumulated_rows >= config_.row_group_size)
+        auto status = impl_->writer->WriteTable(*table, table->num_rows());
+        if (!status.ok())
         {
-            write_accumulated_tables();
+            throw std::runtime_error("Failed to write table: " + status.ToString());
         }
 
-        buffer_index_ = 0;
+        spdlog::debug("Wrote row group with {} records", table->num_rows());
+
+        rows.clear();
+        impl_->string_lengths.clear();
     }
     catch (const std::exception &ex)
     {
@@ -486,9 +483,6 @@ void ParquetMarketDataWriter::flush_buffer()
 void ParquetMarketDataWriter::flush()
 {
     flush_buffer();
-
-    // Write any remaining accumulated data
-    write_accumulated_tables();
 }
 
 size_t ParquetMarketDataWriter::file_size() const

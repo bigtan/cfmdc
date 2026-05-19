@@ -104,8 +104,9 @@ TradingDay 来自 TraderSpi 的登录结果。写盘前会覆盖行情原始 Tra
 
 - compression: `zstd`
 - compression_level: `3`
-- batch_size: `10000`
 - row_group_size: `100000`
+
+Parquet 写入按 `row_group_size` 缓冲并写出 row group。
 
 如需调整，请修改 `src/utils/FileManager.cpp` 中 `ParquetMarketDataWriter::Config` 的初始化配置。
 

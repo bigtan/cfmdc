@@ -42,7 +42,6 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     if (mode == StorageMode::PARQUET || mode == StorageMode::HYBRID)
     {
         ParquetMarketDataWriter::Config config;
-        config.batch_size = 10000;
         config.compression = "zstd";  // Better compression than snappy
         config.compression_level = 3; // Balanced speed/compression
         config.row_group_size = 100000;

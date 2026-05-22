@@ -9,6 +9,6 @@ TEST_CASE("Application version is wired from build metadata", "[constants]")
     REQUIRE_FALSE(cfmdc::APP_VERSION.empty());
     REQUIRE(cfmdc::APP_VERSION != std::string_view{"unknown"});
     REQUIRE(cfmdc::APP_VERSION == std::string_view{CFMDC_VERSION});
-    REQUIRE(cfmdc::APP_VERSION.find(' ') == std::string_view::npos);
-    REQUIRE(cfmdc::APP_VERSION.find('.') != std::string_view::npos);
+    REQUIRE_FALSE(cfmdc::APP_VERSION.contains(' '));
+    REQUIRE(cfmdc::APP_VERSION.contains('.'));
 }

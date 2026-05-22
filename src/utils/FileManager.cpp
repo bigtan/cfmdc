@@ -20,7 +20,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
                                    const std::string &next_action_day, const std::string &startup_time_hms,
                                    StorageMode mode, int worker_core)
     : csv_path_(csv_path), parquet_path_(parquet_path), trading_day_(trading_day), action_day_base_(base_action_day),
-      action_day_next_(next_action_day), storage_mode_(mode), stop_flag_(false)
+      action_day_next_(next_action_day), storage_mode_(mode)
 {
     startup_time_hms_ = startup_time_hms;
     if (startup_time_hms_.empty())
@@ -75,7 +75,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     spdlog::info("AsyncFileManager UpdateTime filter configured: startup_time={}, window={}", startup_time_hms_,
                  window_str);
 
-    worker_thread_ = std::thread(&AsyncFileManager::worker_loop, this);
+    worker_thread_ = std::jthread([this](std::stop_token st) { worker_loop(st); });
 
     // Apply thread affinity
     int actual_core = worker_core;
@@ -177,7 +177,7 @@ void AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketD
 
 void AsyncFileManager::stop()
 {
-    stop_flag_.store(true, std::memory_order_release);
+    worker_thread_.request_stop();
     if (worker_thread_.joinable())
     {
         worker_thread_.join();
@@ -224,7 +224,7 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
     return stats;
 }
 
-void AsyncFileManager::worker_loop()
+void AsyncFileManager::worker_loop(std::stop_token st)
 {
     using namespace std::chrono_literals;
 
@@ -267,7 +267,7 @@ void AsyncFileManager::worker_loop()
 
     std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
 
-    while (!stop_flag_.load(std::memory_order_acquire))
+    while (!st.stop_requested())
     {
         size_t count = 0;
         while (count < kBatchSize && queue_.try_dequeue(batch[count]))

@@ -49,8 +49,8 @@ TEST_CASE("Exception hierarchy", "[error]")
     {
         CtpException ex(100, "Test error");
         REQUIRE(ex.error_code() == 100);
-        REQUIRE(std::string(ex.what()).find("100") != std::string::npos);
-        REQUIRE(std::string(ex.what()).find("Test error") != std::string::npos);
+        REQUIRE(std::string(ex.what()).contains("100"));
+        REQUIRE(std::string(ex.what()).contains("Test error"));
     }
 
     SECTION("Derived exceptions work correctly")

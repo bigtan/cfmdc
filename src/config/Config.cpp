@@ -6,6 +6,7 @@
 #include <cctype>
 #include <format>
 #include <optional>
+#include <ranges>
 
 #include "cfmdc/utils/Error.h"
 
@@ -191,32 +192,44 @@ std::string Config::resolve_path_placeholders(const std::string &path_template, 
         std::string day = trading_day.substr(6, 2);
 
         // Replace placeholders
-        size_t pos = 0;
-        while ((pos = result.find("{tradingday}", pos)) != std::string::npos)
+        if (result.contains("{tradingday}"))
         {
-            result.replace(pos, 12, trading_day);
-            pos += trading_day.length();
+            size_t pos = 0;
+            while ((pos = result.find("{tradingday}", pos)) != std::string::npos)
+            {
+                result.replace(pos, 12, trading_day);
+                pos += trading_day.length();
+            }
         }
 
-        pos = 0;
-        while ((pos = result.find("{year}", pos)) != std::string::npos)
+        if (result.contains("{year}"))
         {
-            result.replace(pos, 6, year);
-            pos += year.length();
+            size_t pos = 0;
+            while ((pos = result.find("{year}", pos)) != std::string::npos)
+            {
+                result.replace(pos, 6, year);
+                pos += year.length();
+            }
         }
 
-        pos = 0;
-        while ((pos = result.find("{month}", pos)) != std::string::npos)
+        if (result.contains("{month}"))
         {
-            result.replace(pos, 7, month);
-            pos += month.length();
+            size_t pos = 0;
+            while ((pos = result.find("{month}", pos)) != std::string::npos)
+            {
+                result.replace(pos, 7, month);
+                pos += month.length();
+            }
         }
 
-        pos = 0;
-        while ((pos = result.find("{day}", pos)) != std::string::npos)
+        if (result.contains("{day}"))
         {
-            result.replace(pos, 5, day);
-            pos += day.length();
+            size_t pos = 0;
+            while ((pos = result.find("{day}", pos)) != std::string::npos)
+            {
+                result.replace(pos, 5, day);
+                pos += day.length();
+            }
         }
     }
 
@@ -280,7 +293,7 @@ int Config::worker_thread_core() const
         if (node.is_string())
         {
             std::string val = *node.value<std::string>();
-            std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) { return std::tolower(c); });
+            std::ranges::transform(val, val.begin(), [](unsigned char c) { return std::tolower(c); });
             if (val == "auto")
             {
                 return -2; // Sentinel for auto
@@ -311,7 +324,7 @@ StorageMode Config::storage_mode() const
     std::string mode_str = *mode_value;
 
     // Convert to lowercase for case-insensitive comparison
-    std::transform(mode_str.begin(), mode_str.end(), mode_str.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::ranges::transform(mode_str, mode_str.begin(), [](unsigned char c) { return std::tolower(c); });
 
     if (mode_str == "parquet")
     {

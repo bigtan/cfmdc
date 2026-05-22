@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
 
 namespace cfmdc
 {
@@ -23,7 +26,7 @@ template <typename T, size_t Size> class LockFreeQueue
     /// @brief Try to enqueue an item (producer side)
     /// @param item Item to enqueue
     /// @return true if successfully enqueued, false if queue is full
-    bool try_enqueue(const T &item) noexcept
+    bool try_enqueue(const T &item) noexcept(std::is_nothrow_copy_assignable_v<T>)
     {
         const size_t current_tail = tail_.load(std::memory_order_relaxed);
         const size_t next_tail = (current_tail + 1) & (Size - 1);
@@ -35,6 +38,25 @@ template <typename T, size_t Size> class LockFreeQueue
         }
 
         buffer_[current_tail] = item;
+        tail_.store(next_tail, std::memory_order_release);
+        return true;
+    }
+
+    /// @brief Try to enqueue an item using move semantics (producer side)
+    /// @param item Item to enqueue
+    /// @return true if successfully enqueued, false if queue is full
+    bool try_enqueue(T &&item) noexcept(std::is_nothrow_move_assignable_v<T>)
+    {
+        const size_t current_tail = tail_.load(std::memory_order_relaxed);
+        const size_t next_tail = (current_tail + 1) & (Size - 1);
+
+        if (next_tail == head_.load(std::memory_order_acquire))
+        {
+            overflow_count_.fetch_add(1, std::memory_order_relaxed);
+            return false; // Queue is full
+        }
+
+        buffer_[current_tail] = std::move(item);
         tail_.store(next_tail, std::memory_order_release);
         return true;
     }
@@ -85,9 +107,15 @@ template <typename T, size_t Size> class LockFreeQueue
     }
 
   private:
-    alignas(64) std::atomic<size_t> head_; // Consumer index (cache line aligned)
-    alignas(64) std::atomic<size_t> tail_; // Producer index (cache line aligned)
-    alignas(64) T buffer_[Size];
+#ifdef __cpp_lib_hardware_interference_size
+    static constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
+#else
+    static constexpr size_t kCacheLineSize = 64;
+#endif
+
+    alignas(kCacheLineSize) std::atomic<size_t> head_; // Consumer index (cache line aligned)
+    alignas(kCacheLineSize) std::atomic<size_t> tail_; // Producer index (cache line aligned)
+    alignas(kCacheLineSize) T buffer_[Size];
     std::atomic<size_t> overflow_count_{0};
 };
 

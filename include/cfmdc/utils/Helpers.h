@@ -27,10 +27,12 @@ namespace cfmdc
 {
 
 /// @brief Set thread affinity to a specific CPU core
+/// @tparam ThreadType Thread type (std::thread or std::jthread)
 /// @param thread Thread handle
 /// @param core_index CPU core index
 /// @return true if successful
-inline bool set_thread_affinity(std::thread &thread, int core_index)
+template <typename ThreadType>
+inline bool set_thread_affinity(ThreadType &thread, int core_index)
 {
     if (core_index < 0)
     {

@@ -84,7 +84,7 @@ class AsyncFileManager
     Statistics get_statistics() const;
 
   private:
-    void worker_loop();
+    void worker_loop(std::stop_token st);
     void write_market_data_to_csv(const CThostFtdcDepthMarketDataField &data);
     void write_market_data_to_parquet(const CThostFtdcDepthMarketDataField &data);
 
@@ -114,8 +114,7 @@ class AsyncFileManager
     LockFreeQueue<CThostFtdcDepthMarketDataField, LOCKFREE_QUEUE_SIZE> queue_;
 
     // Worker thread
-    std::thread worker_thread_;
-    std::atomic<bool> stop_flag_;
+    std::jthread worker_thread_;
 
     // Statistics
     std::atomic<size_t> total_records_{0};

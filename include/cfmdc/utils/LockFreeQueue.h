@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -107,11 +106,7 @@ template <typename T, size_t Size> class LockFreeQueue
     }
 
   private:
-#ifdef __cpp_lib_hardware_interference_size
-    static constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
-#else
     static constexpr size_t kCacheLineSize = 64;
-#endif
 
     alignas(kCacheLineSize) std::atomic<size_t> head_; // Consumer index (cache line aligned)
     alignas(kCacheLineSize) std::atomic<size_t> tail_; // Producer index (cache line aligned)

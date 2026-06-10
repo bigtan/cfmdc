@@ -1,12 +1,43 @@
+#include <spdlog/sinks/daily_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cxxopts.hpp>
 #include <exception>
+#include <memory>
 #include <print>
 #include <string>
 
 #include "cfmdc/core/Application.h"
 #include "cfmdc/utils/Constants.h"
+
+namespace
+{
+
+/// @brief Log to console and a rotating file so incidents can be analyzed after the fact
+void setup_logging()
+{
+    try
+    {
+        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        // Daily file (logs/cfmdc_YYYY-MM-DD.log), 30 days retention. Rotate at 06:00
+        // so a night session crossing midnight stays in one file, grouped with the
+        // following day session (matches the trading day).
+        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>("logs/cfmdc.log", 6, 0, false, 30);
+        auto logger =
+            std::make_shared<spdlog::logger>("cfmdc", spdlog::sinks_init_list{console_sink, file_sink});
+        logger->flush_on(spdlog::level::warn);
+        spdlog::set_default_logger(std::move(logger));
+        spdlog::flush_every(std::chrono::seconds(3));
+    }
+    catch (const spdlog::spdlog_ex &ex)
+    {
+        spdlog::warn("File logging unavailable ({}), using console only", ex.what());
+    }
+}
+
+} // namespace
 
 int main(int argc, char *argv[])
 {
@@ -42,6 +73,8 @@ int main(int argc, char *argv[])
 
         // Get config file
         std::string config_file = result["config"].as<std::string>();
+
+        setup_logging();
 
         spdlog::info("Starting CFMDC - CTP Market Data Recorder v{}", cfmdc::APP_VERSION);
         spdlog::info("Using configuration file: {}", config_file);

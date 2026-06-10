@@ -121,6 +121,22 @@ Placeholders supported in `CSVPath` and `ParquetPath`:
 Version metadata is managed from a single source in `CMakeLists.txt` via
 `CFMDC_PROJECT_VERSION`, then propagated to the binary and tests through CMake.
 
+## Deployment Notes
+
+- The application is designed to run for a single trading session: start it
+  before the session begins and restart it for the next one (TradingDay and
+  storage paths are fixed at startup).
+- Front server retry walks the configured server list once. Run cfmdc under a
+  process supervisor (systemd `Restart=on-failure`, NSSM, etc.) for automatic
+  recovery after a failed start or a crash.
+- `config.toml` contains account credentials. It is excluded from version
+  control via `.gitignore`; also restrict file permissions (e.g. `chmod 600`).
+- Pipeline statistics (stored/queued/dropped records, write failures) are
+  logged once per minute; non-zero `dropped` or `write_failures` values need
+  investigation.
+- Logs are written to the console and to `logs/cfmdc_YYYY-MM-DD.log` (daily
+  files, rotated at 06:00 so a night session stays in one file, 30 days kept).
+
 ## Storage Behavior (Current)
 
 - CSV: one file per instrument, named `{InstrumentID}_{TradingDay}.csv`

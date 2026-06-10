@@ -126,16 +126,6 @@ bool AsyncFileManager::write_market_data_async(const CThostFtdcDepthMarketDataFi
     return queue_.try_enqueue(data);
 }
 
-void AsyncFileManager::write_market_data_sync(const CThostFtdcDepthMarketDataField &data)
-{
-    auto copy = data;
-    if (!process_market_data(copy))
-    {
-        return;
-    }
-    commit_processed_market_data(copy);
-}
-
 bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data) const
 {
     // Filter first: do NOT rewrite TradingDay/ActionDay for dropped data.
@@ -165,7 +155,20 @@ void AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDa
     // Write based on storage mode
     for (auto *writer : writers_)
     {
-        writer->write(data);
+        if (!writer->write(data))
+        {
+            write_failures_.fetch_add(1, std::memory_order_relaxed);
+
+            // Throttled escalation: disk-full / permission errors would otherwise be silent
+            static thread_local auto last_failure_log = std::chrono::steady_clock::time_point{};
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_failure_log > std::chrono::seconds(1))
+            {
+                spdlog::error("Market data write failed for {} (total failures: {})", data.InstrumentID,
+                              write_failures_.load(std::memory_order_relaxed));
+                last_failure_log = now;
+            }
+        }
     }
 }
 
@@ -209,18 +212,12 @@ void AsyncFileManager::flush_all()
 
 AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
 {
+    // Reads atomics only, safe to call from any thread while the worker runs.
     Statistics stats;
-    stats.total_records = total_records_.load();
-    stats.csv_files = csv_writer_ ? csv_writer_->file_count() : 0;
+    stats.total_records = total_records_.load(std::memory_order_relaxed);
     stats.queue_size = queue_.size();
-
-#ifdef CFMDC_ENABLE_PARQUET
-    if (parquet_writer_)
-    {
-        stats.parquet_files = parquet_writer_->writer_count();
-    }
-#endif
-
+    stats.dropped_records = queue_.overflow_count();
+    stats.write_failures = write_failures_.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -236,10 +233,17 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     constexpr int kJitterPercent = 10;
     constexpr size_t kBatchSize = 64;
 
+    // Durability: bound CSV data lost on an abnormal exit (cheap ofstream flush).
+    // Parquet is intentionally NOT flushed periodically: it would fragment row
+    // groups, and without the file footer (written on close) the file is
+    // unreadable anyway - Parquet durability relies on graceful shutdown.
+    constexpr auto kCsvFlushInterval = std::chrono::seconds(5);
+
     using clock = std::chrono::steady_clock;
     auto spin_deadline = clock::now() + kSpinBudget;
     auto yield_deadline = spin_deadline + kYieldBudget;
     auto sleep_duration = kSleepMin;
+    auto next_csv_flush = clock::now() + kCsvFlushInterval;
     std::uint32_t jitter_state = 0x9e3779b9u;
 
     auto reset_backoff = [&]() {
@@ -286,6 +290,14 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         }
 
         auto now = clock::now();
+
+        // Periodic CSV flush while idle so an abnormal exit loses at most a few seconds
+        if (csv_writer_ && now >= next_csv_flush)
+        {
+            csv_writer_->flush();
+            next_csv_flush = now + kCsvFlushInterval;
+        }
+
         if (now < spin_deadline)
         {
             std::atomic_signal_fence(std::memory_order_acquire);
@@ -308,26 +320,6 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     {
         process_data(data);
     }
-}
-
-void AsyncFileManager::write_market_data_to_csv(const CThostFtdcDepthMarketDataField &data)
-{
-    if (csv_writer_)
-    {
-        csv_writer_->write(data);
-    }
-}
-
-void AsyncFileManager::write_market_data_to_parquet(const CThostFtdcDepthMarketDataField &data)
-{
-#ifdef CFMDC_ENABLE_PARQUET
-    if (parquet_writer_)
-    {
-        parquet_writer_->write(data);
-    }
-#else
-    (void)data; // Suppress unused parameter warning
-#endif
 }
 
 } // namespace cfmdc

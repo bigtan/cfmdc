@@ -2,8 +2,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "IMarketDataWriter.h"
@@ -51,10 +53,20 @@ class CsvWriter : public IMarketDataWriter
     }
 
   private:
+    /// @brief Transparent hash so lookups accept string_view without allocating
+    struct StringHash
+    {
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept
+        {
+            return std::hash<std::string_view>{}(sv);
+        }
+    };
+
     /// @brief Get or create file handle for an instrument
     /// @param instrument_id Instrument identifier
     /// @return Pointer to ofstream, or nullptr if failed
-    std::ofstream *get_or_create_file(const std::string &instrument_id);
+    std::ofstream *get_or_create_file(std::string_view instrument_id);
 
     /// @brief Write CSV header to file
     /// @param file Output stream to write header to
@@ -65,7 +77,7 @@ class CsvWriter : public IMarketDataWriter
     std::string trading_day_;
 
     // File handles
-    std::unordered_map<std::string, std::unique_ptr<std::ofstream>> file_handles_;
+    std::unordered_map<std::string, std::unique_ptr<std::ofstream>, StringHash, std::equal_to<>> file_handles_;
 
     // Pre-allocated string buffer for formatting
     std::string csv_buffer_;

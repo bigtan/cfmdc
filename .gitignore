@@ -43,5 +43,11 @@
 /build
 /vcpkg_installed
 
+# Local runtime artifacts (config.toml contains account credentials!)
+config.toml
+/data/
+/flow/
+/logs/
+
 !/3rd/ctp/lib/
 !/3rd/ctp/lib/**

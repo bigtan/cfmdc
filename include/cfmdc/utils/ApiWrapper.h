@@ -66,6 +66,12 @@ class MdApiWrapper
         return api_ != nullptr;
     }
 
+    /// @brief Release the API immediately (deregisters SPI and tears down CTP threads)
+    void reset() noexcept
+    {
+        api_.reset();
+    }
+
   private:
     struct Deleter
     {
@@ -136,6 +142,12 @@ class TraderApiWrapper
     explicit operator bool() const noexcept
     {
         return api_ != nullptr;
+    }
+
+    /// @brief Release the API immediately (deregisters SPI and tears down CTP threads)
+    void reset() noexcept
+    {
+        api_.reset();
     }
 
   private:

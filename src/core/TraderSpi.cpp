@@ -18,11 +18,10 @@ TraderSpi::TraderSpi(const FrontServer &server, const std::filesystem::path &flo
 
 TraderSpi::~TraderSpi()
 {
-    spdlog::info("TraderSpi destructor called - unregistering API SPI...");
-    if (trader_api_)
-    {
-        trader_api_->RegisterSpi(nullptr);
-    }
+    spdlog::info("TraderSpi destructor called - releasing API...");
+    // Release the API before the members the callbacks touch (mutexes, vectors)
+    // are destroyed, so no in-flight callback can race with member destruction.
+    trader_api_.reset();
 }
 
 void TraderSpi::init()
@@ -55,6 +54,17 @@ std::vector<std::string> TraderSpi::get_instrument_ids() const
 {
     std::shared_lock lock(instrument_mutex_);
     return instrument_ids_; // Return copy for thread safety
+}
+
+void TraderSpi::OnFrontDisconnected(int nReason)
+{
+    // The CTP API reconnects and re-authenticates automatically; just make it visible.
+    spdlog::warn("Trading front disconnected, reason: {:#x} (API will auto-reconnect)", nReason);
+}
+
+void TraderSpi::OnHeartBeatWarning(int nTimeLapse)
+{
+    spdlog::warn("Trading front heartbeat warning, {}s since last message", nTimeLapse);
 }
 
 void TraderSpi::OnFrontConnected()
@@ -181,7 +191,7 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
 
     if (pInstrument && pInstrument->ProductClass == THOST_FTDC_APC_FutureSingle)
     {
-        spdlog::info("Instrument {} query successful...", pInstrument->InstrumentID);
+        spdlog::debug("Instrument {} query successful...", pInstrument->InstrumentID);
 
         std::unique_lock lock(instrument_mutex_);
         instrument_ids_.emplace_back(pInstrument->InstrumentID);
@@ -189,6 +199,12 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
 
     if (bIsLast)
     {
+        {
+            std::shared_lock lock(instrument_mutex_);
+            spdlog::info("Instrument query completed, {} subscribable futures contracts collected",
+                         instrument_ids_.size());
+        }
+
         std::lock_guard lock(instrument_query_mutex_);
         instrument_query_in_flight_ = false;
         instrument_query_completed_ = true;

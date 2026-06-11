@@ -20,13 +20,12 @@ MdSpi::MdSpi(const FrontServer &server, const Config &config, const std::filesys
 
 MdSpi::~MdSpi()
 {
-    spdlog::info("MdSpi destructor called - stopping API and async file manager...");
-    
-    // 1. Unregister SPI immediately to stop receiving callbacks
-    if (md_api_)
-    {
-        md_api_->RegisterSpi(nullptr);
-    }
+    spdlog::info("MdSpi destructor called - releasing API and stopping async file manager...");
+
+    // 1. Release the API first: this deregisters the SPI and tears down the CTP
+    //    callback threads, so no callback can race with the file manager teardown.
+    md_api_.reset();
+    file_manager_.store(nullptr, std::memory_order_release);
 
     // 2. Stop and flush the file manager
     if (async_file_manager_)
@@ -61,18 +60,45 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
     spdlog::info("MdSpi configured with TradingDay: {}, BaseActionDay: {}, NextActionDay: {}", trading_day_,
                  action_day_base_, action_day_next_);
 
-    // Resolve paths with actual trading day (from Trader SPI)
-    auto csv_path = config_.csv_path(trading_day_);
-    auto parquet_path = config_.parquet_path(trading_day_);
+    // Resolve only the paths required by the configured storage mode
     auto storage_mode = config_.storage_mode();
+    bool use_csv = storage_mode == StorageMode::CSV || storage_mode == StorageMode::HYBRID;
+    bool use_parquet = storage_mode == StorageMode::PARQUET || storage_mode == StorageMode::HYBRID;
+#ifndef CFMDC_ENABLE_PARQUET
+    if (use_parquet)
+    {
+        // AsyncFileManager falls back to CSV when Parquet support is not compiled in
+        use_csv = true;
+        use_parquet = false;
+    }
+#endif
+
+    auto csv_path = use_csv ? config_.csv_path(trading_day_) : std::filesystem::path{};
+    auto parquet_path = use_parquet ? config_.parquet_path(trading_day_) : std::filesystem::path{};
 
     spdlog::info("Resolved storage paths - CSV: {}, Parquet: {}", csv_path.string(), parquet_path.string());
 
     // Initialize async file manager with lock-free queue for high-frequency trading
     // Re-initialization is safe here as this is called before subscription
+    file_manager_.store(nullptr, std::memory_order_release);
     async_file_manager_ = std::make_unique<AsyncFileManager>(
         csv_path, parquet_path, trading_day_, action_day_base_, action_day_next_, startup_time_hms, storage_mode,
         config_.worker_thread_core());
+    // Publish the fully-constructed manager to the CTP callback thread
+    file_manager_.store(async_file_manager_.get(), std::memory_order_release);
+}
+
+void MdSpi::log_statistics() const
+{
+    auto *file_manager = file_manager_.load(std::memory_order_acquire);
+    if (!file_manager)
+    {
+        return;
+    }
+
+    const auto stats = file_manager->get_statistics();
+    spdlog::info("Market data pipeline: stored={}, queue={}, dropped={}, write_failures={}", stats.total_records,
+                 stats.queue_size, stats.dropped_records, stats.write_failures);
 }
 
 void MdSpi::OnFrontConnected()
@@ -145,13 +171,25 @@ void MdSpi::OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstr
     }
 }
 
+void MdSpi::OnFrontDisconnected(int nReason)
+{
+    // The CTP API reconnects and re-subscribes automatically; just make it visible.
+    spdlog::warn("Market data front disconnected, reason: {:#x} (API will auto-reconnect)", nReason);
+}
+
+void MdSpi::OnHeartBeatWarning(int nTimeLapse)
+{
+    spdlog::warn("Market data heartbeat warning, {}s since last message", nTimeLapse);
+}
+
 void MdSpi::OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData)
 {
-    if (pDepthMarketData && async_file_manager_)
+    auto *file_manager = file_manager_.load(std::memory_order_acquire);
+    if (pDepthMarketData && file_manager)
     {
         // High-performance: just enqueue data
         // Data correction (TradingDay/ActionDay) is now handled in AsyncFileManager consumer thread
-        if (!async_file_manager_->write_market_data_async(*pDepthMarketData))
+        if (!file_manager->write_market_data_async(*pDepthMarketData))
         {
             // Optional: log queue full condition, but avoid frequent logging
             static thread_local auto last_warning = std::chrono::steady_clock::now();

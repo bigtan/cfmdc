@@ -54,10 +54,6 @@ class AsyncFileManager
     /// @return true if enqueued successfully, false if queue is full
     bool write_market_data_async(const CThostFtdcDepthMarketDataField &data);
 
-    /// @brief Synchronous write (fallback method)
-    /// @param data Market data to write
-    void write_market_data_sync(const CThostFtdcDepthMarketDataField &data);
-
     /// @brief Stop the worker thread
     void stop();
 
@@ -73,20 +69,18 @@ class AsyncFileManager
         return storage_mode_;
     }
 
-    /// @brief Get statistics
+    /// @brief Pipeline statistics (all fields safe to read from any thread)
     struct Statistics
     {
-        size_t total_records{0};
-        size_t csv_files{0};
-        size_t parquet_files{0};
-        size_t queue_size{0};
+        size_t total_records{0};   ///< Records written to storage
+        size_t queue_size{0};      ///< Current queue depth
+        size_t dropped_records{0}; ///< Records dropped because the queue was full
+        size_t write_failures{0};  ///< Writer-level write failures
     };
     Statistics get_statistics() const;
 
   private:
     void worker_loop(std::stop_token st);
-    void write_market_data_to_csv(const CThostFtdcDepthMarketDataField &data);
-    void write_market_data_to_parquet(const CThostFtdcDepthMarketDataField &data);
 
     bool process_market_data(CThostFtdcDepthMarketDataField &data) const;
     void write_processed_market_data(const CThostFtdcDepthMarketDataField &data);
@@ -109,7 +103,8 @@ class AsyncFileManager
     // Storage writers
     std::vector<IMarketDataWriter*> writers_;
 
-    // Lock-free queue
+    // Lock-free queue. CN futures peak at ~1000 ticks per 500ms snapshot slice,
+    // so 16384 slots cover several seconds of full-market backlog.
     static constexpr size_t LOCKFREE_QUEUE_SIZE = 16384; // Must be power of 2
     LockFreeQueue<CThostFtdcDepthMarketDataField, LOCKFREE_QUEUE_SIZE> queue_;
 
@@ -118,6 +113,7 @@ class AsyncFileManager
 
     // Statistics
     std::atomic<size_t> total_records_{0};
+    std::atomic<size_t> write_failures_{0};
 };
 
 } // namespace cfmdc

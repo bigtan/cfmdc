@@ -8,6 +8,10 @@
 #include <optional>
 #include <ranges>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #include "cfmdc/utils/Error.h"
 
 namespace cfmdc
@@ -22,6 +26,17 @@ Config::Config(const std::string &config_file)
         parse_front_servers();
         spdlog::info("Configuration loaded from: {}", config_file);
         spdlog::info("Found {} front server(s)", front_servers_.size());
+
+#ifndef _WIN32
+        // The config file holds account credentials - warn if other users can read it
+        struct stat st{};
+        if (::stat(config_file.c_str(), &st) == 0 && (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) != 0)
+        {
+            spdlog::warn("Config file {} is accessible by other users (mode {:o}); it contains credentials, "
+                         "consider 'chmod 600'",
+                         config_file, st.st_mode & 0777);
+        }
+#endif
     }
     catch (const toml::parse_error &e)
     {
@@ -48,14 +63,26 @@ void Config::validate_config()
         throw ConfigException("Missing 'History' section in configuration");
     }
 
-    // Check history path
+    // Check history paths - only the ones the configured storage mode actually uses
     auto history_table = *history.as_table();
-    if (!history_table.contains("CSVPath"))
+    const auto mode = storage_mode();
+    bool needs_csv = mode == StorageMode::CSV || mode == StorageMode::HYBRID;
+    bool needs_parquet = mode == StorageMode::PARQUET || mode == StorageMode::HYBRID;
+#ifndef CFMDC_ENABLE_PARQUET
+    if (needs_parquet)
+    {
+        // AsyncFileManager falls back to CSV when Parquet support is not compiled in
+        needs_csv = true;
+        needs_parquet = false;
+    }
+#endif
+
+    if (needs_csv && !history_table.contains("CSVPath"))
     {
         throw ConfigException("Missing required field: History.CSVPath");
     }
 
-    if (!history_table.contains("ParquetPath"))
+    if (needs_parquet && !history_table.contains("ParquetPath"))
     {
         throw ConfigException("Missing required field: History.ParquetPath");
     }
@@ -184,54 +211,37 @@ std::string Config::resolve_path_placeholders(const std::string &path_template, 
 {
     std::string result = path_template;
 
-    // Validate trading_day format (should be YYYYMMDD)
-    if (trading_day.length() == 8)
+    const bool has_placeholder = result.contains("{tradingday}") || result.contains("{year}") ||
+                                 result.contains("{month}") || result.contains("{day}");
+    if (!has_placeholder)
     {
-        std::string year = trading_day.substr(0, 4);
-        std::string month = trading_day.substr(4, 2);
-        std::string day = trading_day.substr(6, 2);
-
-        // Replace placeholders
-        if (result.contains("{tradingday}"))
-        {
-            size_t pos = 0;
-            while ((pos = result.find("{tradingday}", pos)) != std::string::npos)
-            {
-                result.replace(pos, 12, trading_day);
-                pos += trading_day.length();
-            }
-        }
-
-        if (result.contains("{year}"))
-        {
-            size_t pos = 0;
-            while ((pos = result.find("{year}", pos)) != std::string::npos)
-            {
-                result.replace(pos, 6, year);
-                pos += year.length();
-            }
-        }
-
-        if (result.contains("{month}"))
-        {
-            size_t pos = 0;
-            while ((pos = result.find("{month}", pos)) != std::string::npos)
-            {
-                result.replace(pos, 7, month);
-                pos += month.length();
-            }
-        }
-
-        if (result.contains("{day}"))
-        {
-            size_t pos = 0;
-            while ((pos = result.find("{day}", pos)) != std::string::npos)
-            {
-                result.replace(pos, 5, day);
-                pos += day.length();
-            }
-        }
+        return result;
     }
+
+    // A path with placeholders requires a valid YYYYMMDD trading day; failing loudly
+    // beats silently creating a directory literally named "{tradingday}".
+    const bool valid_trading_day =
+        trading_day.length() == 8 &&
+        std::ranges::all_of(trading_day, [](unsigned char c) { return std::isdigit(c) != 0; });
+    if (!valid_trading_day)
+    {
+        throw ConfigException(
+            std::format("Cannot resolve placeholders in '{}': invalid trading day '{}'", path_template, trading_day));
+    }
+
+    auto replace_all = [&result](std::string_view placeholder, std::string_view value) {
+        size_t pos = 0;
+        while ((pos = result.find(placeholder, pos)) != std::string::npos)
+        {
+            result.replace(pos, placeholder.size(), value);
+            pos += value.size();
+        }
+    };
+
+    replace_all("{tradingday}", trading_day);
+    replace_all("{year}", std::string_view(trading_day).substr(0, 4));
+    replace_all("{month}", std::string_view(trading_day).substr(4, 2));
+    replace_all("{day}", std::string_view(trading_day).substr(6, 2));
 
     return result;
 }

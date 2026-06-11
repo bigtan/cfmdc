@@ -24,8 +24,7 @@ CsvWriter::~CsvWriter()
 
 bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
 {
-    const std::string instrument_id = data.InstrumentID;
-    std::ofstream *file = get_or_create_file(instrument_id);
+    std::ofstream *file = get_or_create_file(data.InstrumentID);
 
     if (!file || !file->is_open())
     {
@@ -51,7 +50,8 @@ bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
         clean_price(data.AskPrice5), data.AskVolume5, clean_price(data.AveragePrice), data.ActionDay);
 
     *file << csv_buffer_ << '\n';
-    return true;
+    // Surface stream errors (disk full, closed handle) instead of silently dropping data
+    return file->good();
 }
 
 void CsvWriter::close_all()
@@ -77,7 +77,7 @@ void CsvWriter::flush()
     }
 }
 
-std::ofstream *CsvWriter::get_or_create_file(const std::string &instrument_id)
+std::ofstream *CsvWriter::get_or_create_file(std::string_view instrument_id)
 {
     // Check if we already have a handle for this instrument
     auto it = file_handles_.find(instrument_id);
@@ -122,7 +122,7 @@ std::ofstream *CsvWriter::get_or_create_file(const std::string &instrument_id)
 
     // Store the file handle
     std::ofstream *file_ptr = file.get();
-    file_handles_[instrument_id] = std::move(file);
+    file_handles_.emplace(std::string(instrument_id), std::move(file));
 
     spdlog::debug("Created CSV file for instrument {}: {}", instrument_id, file_path.string());
 
@@ -142,7 +142,7 @@ void CsvWriter::write_csv_header(std::ofstream &file)
             "AskPrice3,AskVolume3,"
          << "BidPrice4,BidVolume4,AskPrice4,AskVolume4,BidPrice5,BidVolume5,"
             "AskPrice5,AskVolume5,"
-         << "AveragePrice,ActionDay" << std::endl;
+         << "AveragePrice,ActionDay" << '\n';
 }
 
 } // namespace cfmdc

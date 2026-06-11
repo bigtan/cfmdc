@@ -120,9 +120,16 @@ void Application::run()
     spdlog::info("Press Ctrl+C to stop the application");
 
     // Main event loop with graceful shutdown support
+    constexpr int kStatsIntervalTicks = 60; // SLEEP_DURATION is 1s -> log stats every minute
+    int ticks_since_stats = 0;
     while (!g_shutdown_requested.load(std::memory_order_acquire))
     {
         std::this_thread::sleep_for(SLEEP_DURATION);
+        if (++ticks_since_stats >= kStatsIntervalTicks)
+        {
+            ticks_since_stats = 0;
+            md_spi_->log_statistics();
+        }
     }
 
     spdlog::info("Shutdown signal received, cleaning up SPIs and file managers...");

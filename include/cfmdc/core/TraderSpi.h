@@ -69,6 +69,8 @@ class TraderSpi : public CThostFtdcTraderSpi
 
     // CTP API callbacks
     void OnFrontConnected() override;
+    void OnFrontDisconnected(int nReason) override;
+    void OnHeartBeatWarning(int nTimeLapse) override;
     void OnRspAuthenticate(CThostFtdcRspAuthenticateField *pRspAuthenticateField, CThostFtdcRspInfoField *pRspInfo,
                            int nRequestID, bool bIsLast) override;
     void OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtdcRspInfoField *pRspInfo, int nRequestID,

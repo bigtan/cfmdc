@@ -62,8 +62,13 @@ class MdSpi : public CThostFtdcMdSpi
     void set_trading_day_and_action_days(const std::string &trading_day, const std::string &base_action_day,
                                          const std::string &next_action_day, const std::string &startup_time_hms);
 
+    /// @brief Log pipeline statistics (records stored, queue depth, drops)
+    void log_statistics() const;
+
     // CTP API callbacks
     void OnFrontConnected() override;
+    void OnFrontDisconnected(int nReason) override;
+    void OnHeartBeatWarning(int nTimeLapse) override;
     void OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtdcRspInfoField *pRspInfo, int nRequestID,
                         bool bIsLast) override;
     void OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstrument, CThostFtdcRspInfoField *pRspInfo,
@@ -75,6 +80,8 @@ class MdSpi : public CThostFtdcMdSpi
     FrontServer server_;
     const Config &config_;
     std::unique_ptr<AsyncFileManager> async_file_manager_;
+    // Pointer published to the CTP callback thread; owned by async_file_manager_.
+    std::atomic<AsyncFileManager *> file_manager_{nullptr};
 
     std::string trading_day_;
     std::string action_day_base_;

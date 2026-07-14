@@ -80,7 +80,7 @@ cmake --build build
 -DCFMDC_ENABLE_PARQUET=OFF
 ```
 
-此时配置中的 `StorageMode=Parquet/Hybrid` 会被降级为 CSV。
+此时仅允许 `StorageMode=CSV`；配置为 Parquet/Hybrid 会在启动阶段明确失败。
 
 ## 6. 运行与安装
 

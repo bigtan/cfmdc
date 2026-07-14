@@ -76,14 +76,12 @@ void Config::validate_config()
     // Check history paths - only the ones the configured storage mode actually uses
     auto history_table = *history.as_table();
     const auto mode = storage_mode();
-    bool needs_csv = mode == StorageMode::CSV || mode == StorageMode::HYBRID;
-    bool needs_parquet = mode == StorageMode::PARQUET || mode == StorageMode::HYBRID;
+    const bool needs_csv = mode == StorageMode::CSV || mode == StorageMode::HYBRID;
+    const bool needs_parquet = mode == StorageMode::PARQUET || mode == StorageMode::HYBRID;
 #ifndef CFMDC_ENABLE_PARQUET
     if (needs_parquet)
     {
-        // AsyncFileManager falls back to CSV when Parquet support is not compiled in
-        needs_csv = true;
-        needs_parquet = false;
+        throw ConfigException("History.StorageMode requires a build with Parquet support");
     }
 #endif
 
@@ -372,7 +370,7 @@ StorageMode Config::storage_mode() const
     auto mode_value = (*history)["StorageMode"].value<std::string>();
     if (!mode_value)
     {
-        return StorageMode::CSV;
+        throw ConfigException("History.StorageMode must be a string");
     }
     std::string mode_str = *mode_value;
 
@@ -387,14 +385,12 @@ StorageMode Config::storage_mode() const
     {
         return StorageMode::HYBRID;
     }
-    else
+    else if (mode_str == "csv")
     {
-        if (mode_str != "csv")
-        {
-            spdlog::warn("Unknown storage mode '{}', defaulting to CSV", mode_str);
-        }
         return StorageMode::CSV;
     }
+
+    throw ConfigException(std::format("Unsupported History.StorageMode: {}", *mode_value));
 }
 
 size_t Config::parquet_row_group_size() const

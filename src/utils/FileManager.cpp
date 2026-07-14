@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <stdexcept>
 
 #include "cfmdc/utils/Helpers.h"
 #include "cfmdc/utils/MarketDataTimePolicy.h"
@@ -24,6 +25,13 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
       csv_flush_interval_(options.csv_flush_interval > std::chrono::milliseconds::zero() ? options.csv_flush_interval
                                                                                          : std::chrono::seconds(5))
 {
+#ifndef CFMDC_ENABLE_PARQUET
+    if (mode == StorageMode::PARQUET || mode == StorageMode::HYBRID)
+    {
+        throw std::invalid_argument("Parquet storage requires a build with Parquet support");
+    }
+#endif
+
     startup_time_hms_ = startup_time_hms;
     if (startup_time_hms_.empty())
     {
@@ -51,17 +59,6 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         parquet_queue_ = std::make_unique<MarketDataQueue>();
         spdlog::info("Parquet writer initialized at path: {} with ZSTD compression and {} rows per group",
                      parquet_path.string(), config.row_group_size);
-    }
-#else
-    if (mode == StorageMode::PARQUET || mode == StorageMode::HYBRID)
-    {
-        spdlog::warn("Parquet storage requested but not enabled in build. Using CSV only.");
-        storage_mode_ = StorageMode::CSV;
-        if (!csv_writer_)
-        {
-            csv_writer_ = std::make_unique<CsvWriter>(csv_path, trading_day);
-            spdlog::info("CSV writer initialized at path: {}", csv_path.string());
-        }
     }
 #endif
 

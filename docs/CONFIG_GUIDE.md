@@ -64,11 +64,11 @@ SubList = "null"
 - `Parquet`
 - `Hybrid`
 
-配置大小写不敏感，未知值会回退为 CSV。
+配置大小写不敏感。未知值或非字符串值会导致启动失败，避免因拼写错误写出非预期格式。
 
 ### 3.2 CSVPath / ParquetPath
 
-两者为必填字段，即使某个模式当前不使用也需要提供。
+只需提供当前模式使用的路径：CSV 需要 `CSVPath`，Parquet 需要 `ParquetPath`，Hybrid 两者都需要。
 
 支持的占位符：
 

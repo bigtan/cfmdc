@@ -67,14 +67,6 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
     auto storage_mode = config_.storage_mode();
     bool use_csv = storage_mode == StorageMode::CSV || storage_mode == StorageMode::HYBRID;
     bool use_parquet = storage_mode == StorageMode::PARQUET || storage_mode == StorageMode::HYBRID;
-#ifndef CFMDC_ENABLE_PARQUET
-    if (use_parquet)
-    {
-        // AsyncFileManager falls back to CSV when Parquet support is not compiled in
-        use_csv = true;
-        use_parquet = false;
-    }
-#endif
 
     auto csv_path = use_csv ? config_.csv_path(trading_day_) : std::filesystem::path{};
     auto parquet_path = use_parquet ? config_.parquet_path(trading_day_) : std::filesystem::path{};

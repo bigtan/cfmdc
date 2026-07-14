@@ -138,7 +138,7 @@ AppID = "test_app2"
 [History]
 CSVPath = "./test_data/csv"
 ParquetPath = "./test_data/parquet"
-StorageMode = "Parquet"
+StorageMode = "CSV"
 
 [Application]
 SubList = "rb2505|IC2501"
@@ -228,7 +228,7 @@ AppID = "test_app"
 [History]
 CSVPath = "./data/csv"
 ParquetPath = "./data/parquet"
-StorageMode = "Hybrid"
+StorageMode = "CSV"
 ParquetRowGroupSize = 4096
 
 [Application]
@@ -241,7 +241,7 @@ SubList = "rb2505|IC2501"
         REQUIRE(config.flow_path().generic_string() == "./custom-flow");
         REQUIRE(config.init_timeout() == 90);
         REQUIRE(config.subscription_list() == "rb2505|IC2501");
-        REQUIRE(config.storage_mode() == StorageMode::HYBRID);
+        REQUIRE(config.storage_mode() == StorageMode::CSV);
         REQUIRE(config.parquet_row_group_size() == 4096);
 
         std::filesystem::remove(test_config);
@@ -274,7 +274,7 @@ StorageMode = "CSV"
         std::filesystem::remove(test_config);
     }
 
-    SECTION("StorageMode is case-insensitive and defaults to CSV on unknown")
+    SECTION("StorageMode is case-insensitive and rejects unknown values")
     {
         const std::string test_config = "test_config_storage.toml";
         write_config_file(test_config, R"(
@@ -291,11 +291,11 @@ AppID = "test_app"
 [History]
 CSVPath = "./data/csv"
 ParquetPath = "./data/parquet"
-StorageMode = "ParQuEt"
+StorageMode = "CsV"
 )");
 
         Config config(test_config);
-        REQUIRE(config.storage_mode() == StorageMode::PARQUET);
+        REQUIRE(config.storage_mode() == StorageMode::CSV);
 
         std::filesystem::remove(test_config);
 
@@ -317,10 +317,29 @@ ParquetPath = "./data/parquet"
 StorageMode = "not-a-mode"
 )");
 
-        Config config_unknown(test_config_unknown);
-        REQUIRE(config_unknown.storage_mode() == StorageMode::CSV);
+        REQUIRE_THROWS_AS(Config(test_config_unknown), ConfigException);
 
         std::filesystem::remove(test_config_unknown);
+
+        const std::string test_config_invalid_type = "test_config_storage_invalid_type.toml";
+        write_config_file(test_config_invalid_type, R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+CSVPath = "./data/csv"
+StorageMode = 1
+)");
+
+        REQUIRE_THROWS_AS(Config(test_config_invalid_type), ConfigException);
+        std::filesystem::remove(test_config_invalid_type);
     }
 
     SECTION("Parquet row group size is validated")
@@ -346,4 +365,29 @@ ParquetRowGroupSize = 0
         REQUIRE_THROWS_AS(Config(test_config), ConfigException);
         std::filesystem::remove(test_config);
     }
+
+#ifndef CFMDC_ENABLE_PARQUET
+    SECTION("Parquet mode requires a Parquet-enabled build")
+    {
+        const std::string test_config = "test_config_parquet_disabled.toml";
+        write_config_file(test_config, R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+ParquetPath = "./data/parquet"
+StorageMode = "Parquet"
+)");
+
+        REQUIRE_THROWS_AS(Config(test_config), ConfigException);
+        std::filesystem::remove(test_config);
+    }
+#endif
 }

@@ -60,6 +60,7 @@ cmake --build build
 - Default build enables x86-64-v3 (AVX2). Disable if you need older CPUs:
   `-DCFMDC_ENABLE_ARCH_V3=OFF`
 - Disable Parquet if Arrow is not available: `-DCFMDC_ENABLE_PARQUET=OFF`
+  (only `StorageMode=CSV` is accepted in that build)
 
 ## Configuration
 

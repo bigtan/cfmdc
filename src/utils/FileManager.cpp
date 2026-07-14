@@ -150,32 +150,43 @@ bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data)
     return true;
 }
 
-void AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDataField &data)
+bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDataField &data)
 {
-    // Write based on storage mode
+    bool success = true;
     for (auto *writer : writers_)
     {
         if (!writer->write(data))
         {
-            write_failures_.fetch_add(1, std::memory_order_relaxed);
-
-            // Throttled escalation: disk-full / permission errors would otherwise be silent
-            static thread_local auto last_failure_log = std::chrono::steady_clock::time_point{};
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_failure_log > std::chrono::seconds(1))
-            {
-                spdlog::error("Market data write failed for {} (total failures: {})", data.InstrumentID,
-                              write_failures_.load(std::memory_order_relaxed));
-                last_failure_log = now;
-            }
+            success = false;
+            mark_write_failure("write", data.InstrumentID);
         }
     }
+    return success;
 }
 
-void AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketDataField &data)
+bool AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketDataField &data)
 {
-    write_processed_market_data(data);
+    if (!write_processed_market_data(data))
+    {
+        return false;
+    }
     total_records_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void AsyncFileManager::mark_write_failure(std::string_view operation, std::string_view instrument_id)
+{
+    const auto failures = write_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
+    fatal_error_.store(true, std::memory_order_release);
+    if (instrument_id.empty())
+    {
+        spdlog::critical("Market data storage {} failed (total failures: {}); stopping pipeline", operation, failures);
+    }
+    else
+    {
+        spdlog::critical("Market data storage {} failed for {} (total failures: {}); stopping pipeline", operation,
+                         instrument_id, failures);
+    }
 }
 
 void AsyncFileManager::stop()
@@ -202,12 +213,18 @@ void AsyncFileManager::close_all()
 #endif
 }
 
-void AsyncFileManager::flush_all()
+bool AsyncFileManager::flush_all()
 {
+    bool success = true;
     for (auto *writer : writers_)
     {
-        writer->flush();
+        if (!writer->flush())
+        {
+            success = false;
+            mark_write_failure("flush");
+        }
     }
+    return success;
 }
 
 AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
@@ -264,9 +281,9 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     auto process_data = [&](CThostFtdcDepthMarketDataField &data) {
         if (!process_market_data(data))
         {
-            return;
+            return true;
         }
-        commit_processed_market_data(data);
+        return commit_processed_market_data(data);
     };
 
     std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
@@ -283,7 +300,10 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         {
             for (size_t i = 0; i < count; ++i)
             {
-                process_data(batch[i]);
+                if (!process_data(batch[i]))
+                {
+                    return;
+                }
             }
             reset_backoff();
             continue;
@@ -294,7 +314,11 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         // Periodic CSV flush while idle so an abnormal exit loses at most a few seconds
         if (csv_writer_ && now >= next_csv_flush)
         {
-            csv_writer_->flush();
+            if (!csv_writer_->flush())
+            {
+                mark_write_failure("periodic flush");
+                return;
+            }
             next_csv_flush = now + kCsvFlushInterval;
         }
 
@@ -318,7 +342,10 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     CThostFtdcDepthMarketDataField data;
     while (queue_.try_dequeue(data))
     {
-        process_data(data);
+        if (!process_data(data))
+        {
+            return;
+        }
     }
 }
 

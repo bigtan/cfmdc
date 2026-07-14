@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -37,8 +38,8 @@ class AsyncFileManager
     /// @param mode Storage mode
     explicit AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                               const std::string &trading_day, const std::string &base_action_day,
-                              const std::string &next_action_day, const std::string &startup_time_hms,
-                              StorageMode mode, int worker_core = -1);
+                              const std::string &next_action_day, const std::string &startup_time_hms, StorageMode mode,
+                              int worker_core = -1);
 
     /// @brief Destructor
     ~AsyncFileManager();
@@ -61,7 +62,14 @@ class AsyncFileManager
     void close_all();
 
     /// @brief Flush all open files
-    void flush_all();
+    /// @return true if every configured writer flushed successfully
+    bool flush_all();
+
+    /// @brief Check whether the pipeline stopped because storage failed
+    bool has_fatal_error() const noexcept
+    {
+        return fatal_error_.load(std::memory_order_acquire);
+    }
 
     /// @brief Get current storage mode
     StorageMode storage_mode() const
@@ -83,8 +91,9 @@ class AsyncFileManager
     void worker_loop(std::stop_token st);
 
     bool process_market_data(CThostFtdcDepthMarketDataField &data) const;
-    void write_processed_market_data(const CThostFtdcDepthMarketDataField &data);
-    void commit_processed_market_data(const CThostFtdcDepthMarketDataField &data);
+    bool write_processed_market_data(const CThostFtdcDepthMarketDataField &data);
+    bool commit_processed_market_data(const CThostFtdcDepthMarketDataField &data);
+    void mark_write_failure(std::string_view operation, std::string_view instrument_id = {});
 
     // Configuration
     std::filesystem::path csv_path_;
@@ -101,7 +110,7 @@ class AsyncFileManager
     std::unique_ptr<ParquetBatchWriter> parquet_writer_;
 #endif
     // Storage writers
-    std::vector<IMarketDataWriter*> writers_;
+    std::vector<IMarketDataWriter *> writers_;
 
     // Lock-free queue. CN futures peak at ~1000 ticks per 500ms snapshot slice,
     // so 16384 slots cover several seconds of full-market backlog.
@@ -114,6 +123,7 @@ class AsyncFileManager
     // Statistics
     std::atomic<size_t> total_records_{0};
     std::atomic<size_t> write_failures_{0};
+    std::atomic<bool> fatal_error_{false};
 };
 
 } // namespace cfmdc

@@ -107,7 +107,8 @@ class ParquetBatchWriter : public IMarketDataWriter
     bool write(const CThostFtdcDepthMarketDataField &data) override;
 
     /// @brief Flush writer
-    void flush() override;
+    /// @return true if buffered rows were flushed successfully
+    bool flush() override;
 
     /// @brief Close writer
     void close_all();

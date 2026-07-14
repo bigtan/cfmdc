@@ -66,15 +66,18 @@ void CsvWriter::close_all()
     file_handles_.clear();
 }
 
-void CsvWriter::flush()
+bool CsvWriter::flush()
 {
+    bool success = true;
     for (auto &[instrument_id, file] : file_handles_)
     {
         if (file && file->is_open())
         {
             file->flush();
+            success = file->good() && success;
         }
     }
+    return success;
 }
 
 std::ofstream *CsvWriter::get_or_create_file(std::string_view instrument_id)

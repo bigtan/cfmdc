@@ -10,6 +10,7 @@ set(TEST_SOURCES
     test_constants.cpp
     test_config.cpp
     test_error.cpp
+    test_file_manager.cpp
     test_lock_free_queue.cpp
     test_market_data_time_policy.cpp
 )

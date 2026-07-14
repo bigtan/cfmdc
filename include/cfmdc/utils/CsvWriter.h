@@ -41,7 +41,8 @@ class CsvWriter : public IMarketDataWriter
     bool write(const CThostFtdcDepthMarketDataField &data) override;
 
     /// @brief Flush all open files
-    void flush() override;
+    /// @return true if every stream flushed successfully
+    bool flush() override;
 
     /// @brief Close all open files
     void close_all();

@@ -584,7 +584,7 @@ bool ParquetBatchWriter::write(const CThostFtdcDepthMarketDataField &data)
     }
 }
 
-void ParquetBatchWriter::flush()
+bool ParquetBatchWriter::flush()
 {
     try
     {
@@ -592,10 +592,12 @@ void ParquetBatchWriter::flush()
         {
             writer_->flush();
         }
+        return true;
     }
     catch (const std::exception &ex)
     {
         spdlog::error("Failed to flush writer: {}", ex.what());
+        return false;
     }
 }
 

@@ -56,8 +56,11 @@ void Application::run()
     // Initialize trader SPI with retry across all front servers
     if (!init_trader_with_retry())
     {
-        spdlog::error("All trader front servers failed, exiting...");
-        return;
+        if (g_shutdown_requested.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        throw std::runtime_error("All trader front servers failed");
     }
 
     // Parse subscription list and query instruments
@@ -68,8 +71,11 @@ void Application::run()
     // Initialize market data SPI with retry across all front servers
     if (!init_md_with_retry())
     {
-        spdlog::error("All market data front servers failed, exiting...");
-        return;
+        if (g_shutdown_requested.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        throw std::runtime_error("All market data front servers failed");
     }
 
     // Configure MdSpi with TradingDay from TraderSpi and calculated ActionDays
@@ -120,23 +126,36 @@ void Application::run()
     spdlog::info("Press Ctrl+C to stop the application");
 
     // Main event loop with graceful shutdown support
-    constexpr int kStatsIntervalTicks = 60; // SLEEP_DURATION is 1s -> log stats every minute
-    int ticks_since_stats = 0;
+    constexpr auto kHealthCheckInterval = std::chrono::milliseconds(100);
+    constexpr auto kStatsInterval = std::chrono::minutes(1);
+    auto next_stats = std::chrono::steady_clock::now() + kStatsInterval;
     while (!g_shutdown_requested.load(std::memory_order_acquire))
     {
-        std::this_thread::sleep_for(SLEEP_DURATION);
-        if (++ticks_since_stats >= kStatsIntervalTicks)
+        std::this_thread::sleep_for(kHealthCheckInterval);
+        if (md_spi_->has_fatal_pipeline_error())
         {
-            ticks_since_stats = 0;
+            throw std::runtime_error("Market data storage pipeline failed");
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_stats)
+        {
             md_spi_->log_statistics();
+            next_stats = now + kStatsInterval;
         }
     }
 
     spdlog::info("Shutdown signal received, cleaning up SPIs and file managers...");
 
     // Explicitly reset in reverse order of initialization
+    const bool storage_shutdown_succeeded = md_spi_->shutdown();
     md_spi_.reset();
     trader_spi_.reset();
+
+    if (!storage_shutdown_succeeded)
+    {
+        throw std::runtime_error("Market data storage failed during shutdown");
+    }
 
     spdlog::info("Cleanup completed, exiting application.");
 }

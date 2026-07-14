@@ -17,7 +17,8 @@ class IMarketDataWriter
     virtual bool write(const CThostFtdcDepthMarketDataField &data) = 0;
 
     /// @brief Flush buffered data (if any)
-    virtual void flush() = 0;
+    /// @return true if all buffered data was flushed successfully
+    virtual bool flush() = 0;
 };
 
 } // namespace cfmdc

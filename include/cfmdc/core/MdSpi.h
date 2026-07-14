@@ -65,6 +65,13 @@ class MdSpi : public CThostFtdcMdSpi
     /// @brief Log pipeline statistics (records stored, queue depth, drops)
     void log_statistics() const;
 
+    /// @brief Check whether asynchronous storage encountered a fatal error
+    bool has_fatal_pipeline_error() const noexcept;
+
+    /// @brief Stop callbacks and flush storage
+    /// @return true if the storage pipeline completed without errors
+    bool shutdown();
+
     // CTP API callbacks
     void OnFrontConnected() override;
     void OnFrontDisconnected(int nReason) override;
@@ -87,6 +94,8 @@ class MdSpi : public CThostFtdcMdSpi
     std::string action_day_base_;
     std::string action_day_next_;
     std::atomic<bool> is_ready_{false};
+    std::atomic<bool> shutdown_started_{false};
+    std::atomic<bool> shutdown_succeeded_{true};
 };
 
 } // namespace cfmdc

@@ -21,17 +21,9 @@ MdSpi::MdSpi(const FrontServer &server, const Config &config, const std::filesys
 MdSpi::~MdSpi()
 {
     spdlog::info("MdSpi destructor called - releasing API and stopping async file manager...");
-
-    // 1. Release the API first: this deregisters the SPI and tears down the CTP
-    //    callback threads, so no callback can race with the file manager teardown.
-    md_api_.reset();
-    file_manager_.store(nullptr, std::memory_order_release);
-
-    // 2. Stop and flush the file manager
-    if (async_file_manager_)
+    if (!shutdown())
     {
-        async_file_manager_->stop();
-        async_file_manager_->flush_all();
+        spdlog::critical("Market data storage did not shut down cleanly");
     }
 }
 
@@ -99,6 +91,33 @@ void MdSpi::log_statistics() const
     const auto stats = file_manager->get_statistics();
     spdlog::info("Market data pipeline: stored={}, queue={}, dropped={}, write_failures={}", stats.total_records,
                  stats.queue_size, stats.dropped_records, stats.write_failures);
+}
+
+bool MdSpi::has_fatal_pipeline_error() const noexcept
+{
+    auto *file_manager = file_manager_.load(std::memory_order_acquire);
+    return file_manager && file_manager->has_fatal_error();
+}
+
+bool MdSpi::shutdown()
+{
+    if (shutdown_started_.exchange(true, std::memory_order_acq_rel))
+    {
+        return shutdown_succeeded_.load(std::memory_order_acquire);
+    }
+
+    // Release the API first so callbacks cannot race with queue teardown.
+    md_api_.reset();
+    file_manager_.store(nullptr, std::memory_order_release);
+
+    bool success = true;
+    if (async_file_manager_)
+    {
+        async_file_manager_->stop();
+        success = async_file_manager_->flush_all() && !async_file_manager_->has_fatal_error();
+    }
+    shutdown_succeeded_.store(success, std::memory_order_release);
+    return success;
 }
 
 void MdSpi::OnFrontConnected()

@@ -4,7 +4,7 @@ CFMDC is a C++23 market data recorder for China futures using the CTP API.
 It focuses on high-throughput ingestion, async storage, and production-friendly
 operations.
 
-Current project version: `0.1.0`.
+Current project version: `0.1.2`.
 
 ## Highlights
 

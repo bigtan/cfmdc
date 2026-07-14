@@ -229,6 +229,7 @@ AppID = "test_app"
 CSVPath = "./data/csv"
 ParquetPath = "./data/parquet"
 StorageMode = "Hybrid"
+ParquetRowGroupSize = 4096
 
 [Application]
 FlowPath = "./custom-flow"
@@ -241,6 +242,7 @@ SubList = "rb2505|IC2501"
         REQUIRE(config.init_timeout() == 90);
         REQUIRE(config.subscription_list() == "rb2505|IC2501");
         REQUIRE(config.storage_mode() == StorageMode::HYBRID);
+        REQUIRE(config.parquet_row_group_size() == 4096);
 
         std::filesystem::remove(test_config);
     }
@@ -319,5 +321,29 @@ StorageMode = "not-a-mode"
         REQUIRE(config_unknown.storage_mode() == StorageMode::CSV);
 
         std::filesystem::remove(test_config_unknown);
+    }
+
+    SECTION("Parquet row group size is validated")
+    {
+        const std::string test_config = "test_config_parquet_rows.toml";
+        write_config_file(test_config, R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+ParquetPath = "./data/parquet"
+StorageMode = "Parquet"
+ParquetRowGroupSize = 0
+)");
+
+        REQUIRE_THROWS_AS(Config(test_config), ConfigException);
+        std::filesystem::remove(test_config);
     }
 }

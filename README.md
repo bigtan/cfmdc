@@ -94,6 +94,7 @@ AppID = "your_app_id"
 StorageMode = "Parquet"
 CSVPath = "./data/csv/{tradingday}"
 ParquetPath = "./data/parquet/{tradingday}"
+ParquetRowGroupSize = 100000
 
 [Application]
 InitTimeout = 60
@@ -143,7 +144,8 @@ Version metadata is managed from a single source in `CMakeLists.txt` via
 - Parquet: single timestamped file per run in `ParquetPath`
 - TradingDay is taken from Trader SPI and applied to all stored ticks
 - UpdateTime filtering and ActionDay correction happen in the async worker
-- Parquet writer parameters are compiled-in (zstd, batch 10000, row-group 100000)
+- Parquet uses a dedicated writer queue/thread so compression does not block CSV or ingestion processing
+- Parquet uses zstd level 3; `History.ParquetRowGroupSize` controls the throughput/tail-latency tradeoff
 
 ## Tests
 

@@ -20,6 +20,7 @@ AppID = "your_app_id"
 StorageMode = "Parquet"
 CSVPath = "./data/csv/{tradingday}"
 ParquetPath = "./data/parquet/{tradingday}"
+ParquetRowGroupSize = 100000
 
 [Application]
 InitTimeout = 60
@@ -84,6 +85,11 @@ CSVPath = "./data/{year}/{month}/csv/{tradingday}"
 ParquetPath = "./data/{year}/{month}/parquet/{tradingday}"
 ```
 
+### 3.3 ParquetRowGroupSize
+
+Parquet 每个 Row Group 的行数，默认 `100000`，有效范围 `1` 到 `1000000`。
+较小的值可缩短单次构建和压缩造成的尾延迟，较大的值通常有利于压缩率和批量吞吐。
+
 ## 4. Application（应用配置）
 
 ### 4.1 InitTimeout
@@ -111,13 +117,10 @@ CTP 流文件路径，默认 `./flow`。若目录不存在会自动创建。
 
 ## 6. 当前未启用的配置
 
-代码当前未读取日志配置或 Parquet 参数（压缩、row group 大小等）。
-当前 Parquet 默认值定义在 `src/utils/FileManager.cpp`：
+代码当前未读取日志配置或 Parquet 压缩算法参数。当前固定值为：
 
 - `compression = "zstd"`
 - `compression_level = 3`
-- `row_group_size = 100000`
 
-Parquet 写入按 `row_group_size` 缓冲并写出 row group。
-
-如需调整，请修改该文件中的 `ParquetMarketDataWriter::Config` 初始化逻辑。
+Row Group 大小通过 `History.ParquetRowGroupSize` 配置。Parquet 拥有独立队列和写线程，
+Row Group 构建及压缩不会阻塞 CSV 写入或行情清洗线程。

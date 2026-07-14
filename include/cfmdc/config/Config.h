@@ -65,6 +65,10 @@ class Config
     /// @return Storage mode (CSV, Parquet, or Hybrid)
     StorageMode storage_mode() const;
 
+    /// @brief Get Parquet row-group size
+    /// @return Rows per group (default: 100000)
+    size_t parquet_row_group_size() const;
+
     /// @brief Get raw TOML configuration
     /// @return Reference to TOML table
     const toml::table &raw_config() const noexcept

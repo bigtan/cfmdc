@@ -54,10 +54,9 @@ LockFreeQueue (SPSC)
    ▼
 AsyncFileManager::worker_loop
    │  (过滤 UpdateTime，修正 TradingDay/ActionDay)
-   ▼
-CsvWriter / ParquetBatchWriter
-   ▼
-磁盘
+   ├──────────────► CsvWriter ──────────────► 磁盘
+   │
+   └► ParquetQueue ─► Parquet writer thread ─► 磁盘
 ```
 
 ## 5. 时间与交易日策略
@@ -97,6 +96,7 @@ CsvWriter / ParquetBatchWriter
 
 - 行情线程只做入队操作
 - 异步线程批量出队并写盘
+- Parquet 使用独立 SPSC 队列和写线程，隔离 Row Group 构建及压缩暂停
 - 队列满时丢弃数据并限频告警
 - 自适应退避（自旋 -> yield -> sleep）降低空转开销
 

@@ -96,6 +96,10 @@ void Config::validate_config()
     {
         throw ConfigException("Missing required field: History.ParquetPath");
     }
+    if (needs_parquet)
+    {
+        (void)parquet_row_group_size();
+    }
 
     // Validate Front configuration - support both single and multiple servers
     auto required_fields = std::vector<std::string>{"MD_Url",   "TD_Url",          "BrokerID", "UserID",
@@ -391,6 +395,26 @@ StorageMode Config::storage_mode() const
         }
         return StorageMode::CSV;
     }
+}
+
+size_t Config::parquet_row_group_size() const
+{
+    constexpr int64_t kDefaultRowGroupSize = 100000;
+    constexpr int64_t kMaxRowGroupSize = 1000000;
+
+    auto history = config_["History"].as_table();
+    if (!history || !history->contains("ParquetRowGroupSize"))
+    {
+        return kDefaultRowGroupSize;
+    }
+
+    auto value = (*history)["ParquetRowGroupSize"].value<int64_t>();
+    if (!value || *value <= 0 || *value > kMaxRowGroupSize)
+    {
+        throw ConfigException(
+            std::format("History.ParquetRowGroupSize must be an integer between 1 and {}", kMaxRowGroupSize));
+    }
+    return static_cast<size_t>(*value);
 }
 
 } // namespace cfmdc

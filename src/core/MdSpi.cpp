@@ -84,9 +84,15 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
     // Initialize async file manager with lock-free queue for high-frequency trading
     // Re-initialization is safe here as this is called before subscription
     file_manager_.store(nullptr, std::memory_order_release);
-    async_file_manager_ = std::make_unique<AsyncFileManager>(
-        csv_path, parquet_path, trading_day_, action_day_base_, action_day_next_, startup_time_hms, storage_mode,
-        config_.worker_thread_core());
+    AsyncFileManager::Options file_manager_options;
+    file_manager_options.worker_core = config_.worker_thread_core();
+    if (use_parquet)
+    {
+        file_manager_options.parquet_row_group_size = config_.parquet_row_group_size();
+    }
+    async_file_manager_ =
+        std::make_unique<AsyncFileManager>(csv_path, parquet_path, trading_day_, action_day_base_, action_day_next_,
+                                           startup_time_hms, storage_mode, file_manager_options);
     // Publish the fully-constructed manager to the CTP callback thread
     file_manager_.store(async_file_manager_.get(), std::memory_order_release);
 }
@@ -100,9 +106,10 @@ void MdSpi::log_statistics() const
     }
 
     const auto stats = file_manager->get_statistics();
-    spdlog::info("Market data pipeline: stored={}, queue={}, dropped={}, write_failures={}, csv_flushes={}",
-                 stats.total_records, stats.queue_size, stats.dropped_records, stats.write_failures,
-                 stats.periodic_flushes);
+    spdlog::info("Market data pipeline: stored={}, csv={}, parquet={}, ingress_queue={}, parquet_queue={}, dropped={}, "
+                 "write_failures={}, csv_flushes={}",
+                 stats.total_records, stats.csv_records, stats.parquet_records, stats.queue_size,
+                 stats.parquet_queue_size, stats.dropped_records, stats.write_failures, stats.periodic_flushes);
 }
 
 bool MdSpi::has_fatal_pipeline_error() const noexcept

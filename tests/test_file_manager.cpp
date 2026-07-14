@@ -32,8 +32,9 @@ TEST_CASE("AsyncFileManager marks storage failures as fatal", "[file_manager][fa
     }
 
     {
-        auto manager = std::make_unique<AsyncFileManager>(invalid_directory, std::filesystem::path{}, "20250102",
-                                                          "20250101", "20250102", "09:00:00", StorageMode::CSV);
+        auto manager =
+            std::make_unique<AsyncFileManager>(invalid_directory, std::filesystem::path{}, "20250102", "20250101",
+                                               "20250102", "09:00:00", StorageMode::CSV, AsyncFileManager::Options{});
         REQUIRE(manager->write_market_data_async(make_tick()));
 
         const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -56,8 +57,10 @@ TEST_CASE("AsyncFileManager periodically flushes CSV during sustained writes", "
     const auto output_directory = std::filesystem::current_path() / "test_periodic_flush_output";
     std::filesystem::remove_all(output_directory);
 
+    AsyncFileManager::Options options;
+    options.csv_flush_interval = 1ms;
     auto manager = std::make_unique<AsyncFileManager>(output_directory, std::filesystem::path{}, "20250102", "20250101",
-                                                      "20250102", "09:00:00", StorageMode::CSV, -1, 1ms);
+                                                      "20250102", "09:00:00", StorageMode::CSV, options);
 
     constexpr size_t kRecordCount = 20000;
     const auto tick = make_tick();
@@ -85,3 +88,40 @@ TEST_CASE("AsyncFileManager periodically flushes CSV during sustained writes", "
     manager.reset();
     std::filesystem::remove_all(output_directory);
 }
+
+#ifdef CFMDC_ENABLE_PARQUET
+TEST_CASE("AsyncFileManager drains CSV and Parquet workers independently", "[file_manager][hybrid]")
+{
+    const auto output_root = std::filesystem::current_path() / "test_hybrid_pipeline_output";
+    std::filesystem::remove_all(output_root);
+
+    AsyncFileManager::Options options;
+    options.parquet_row_group_size = 256;
+    auto manager = std::make_unique<AsyncFileManager>(output_root / "csv", output_root / "parquet", "20250102",
+                                                      "20250101", "20250102", "09:00:00", StorageMode::HYBRID, options);
+
+    constexpr size_t kRecordCount = 2000;
+    const auto tick = make_tick();
+    for (size_t i = 0; i < kRecordCount; ++i)
+    {
+        while (!manager->write_market_data_async(tick))
+        {
+            REQUIRE_FALSE(manager->has_fatal_error());
+            std::this_thread::yield();
+        }
+    }
+
+    manager->stop();
+    REQUIRE(manager->flush_all());
+    const auto stats = manager->get_statistics();
+    REQUIRE(stats.total_records == kRecordCount);
+    REQUIRE(stats.csv_records == kRecordCount);
+    REQUIRE(stats.parquet_records == kRecordCount);
+    REQUIRE(stats.queue_size == 0);
+    REQUIRE(stats.parquet_queue_size == 0);
+    REQUIRE(stats.write_failures == 0);
+
+    manager.reset();
+    std::filesystem::remove_all(output_root);
+}
+#endif

@@ -63,8 +63,9 @@ ParquetPath = "./data/{year}/{month}/parquet/{tradingday}"
 ```
 OnRtnDepthMarketData
   -> LockFreeQueue (SPSC)
-  -> AsyncFileManager worker
-  -> CsvWriter / ParquetBatchWriter
+  -> AsyncFileManager processing worker
+       -> CsvWriter
+       -> ParquetQueue (SPSC) -> Parquet writer thread
 ```
 
 特性：
@@ -98,17 +99,17 @@ TradingDay 来自 TraderSpi 的登录结果。写盘前会覆盖行情原始 Tra
 | 07:00 - 17:00 | 08:55:00 - 15:30:00 |
 | > 17:00 | 20:55:00 - 23:59:59 和 00:00:00 - 03:00:00 |
 
-## 6. Parquet 参数（当前编译内置）
+## 6. Parquet 参数
 
-当前版本未从配置文件读取 Parquet 参数，默认值在代码中固定：
+当前参数：
 
 - compression: `zstd`
 - compression_level: `3`
-- row_group_size: `100000`
+- row_group_size: 由 `History.ParquetRowGroupSize` 配置，默认 `100000`
 
 Parquet 写入按 `row_group_size` 缓冲并写出 row group。
 
-如需调整，请修改 `src/utils/FileManager.cpp` 中 `ParquetMarketDataWriter::Config` 的初始化配置。
+Parquet 使用独立队列和线程，Row Group 构建与压缩不会阻塞主处理线程或 CSV writer。
 
 ## 7. 构建兼容性
 

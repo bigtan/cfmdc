@@ -18,11 +18,11 @@ namespace cfmdc
 AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                                    const std::string &trading_day, const std::string &base_action_day,
                                    const std::string &next_action_day, const std::string &startup_time_hms,
-                                   StorageMode mode, int worker_core, std::chrono::milliseconds csv_flush_interval)
+                                   StorageMode mode, Options options)
     : csv_path_(csv_path), parquet_path_(parquet_path), trading_day_(trading_day), action_day_base_(base_action_day),
       action_day_next_(next_action_day), storage_mode_(mode),
-      csv_flush_interval_(csv_flush_interval > std::chrono::milliseconds::zero() ? csv_flush_interval
-                                                                                : std::chrono::seconds(5))
+      csv_flush_interval_(options.csv_flush_interval > std::chrono::milliseconds::zero() ? options.csv_flush_interval
+                                                                                         : std::chrono::seconds(5))
 {
     startup_time_hms_ = startup_time_hms;
     if (startup_time_hms_.empty())
@@ -36,7 +36,6 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     if (mode == StorageMode::CSV || mode == StorageMode::HYBRID)
     {
         csv_writer_ = std::make_unique<CsvWriter>(csv_path, trading_day);
-        writers_.push_back(csv_writer_.get());
         spdlog::info("CSV writer initialized at path: {}", csv_path.string());
     }
 
@@ -46,11 +45,12 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         ParquetMarketDataWriter::Config config;
         config.compression = "zstd";  // Better compression than snappy
         config.compression_level = 3; // Balanced speed/compression
-        config.row_group_size = 100000;
+        config.row_group_size = (std::max)(size_t{1}, options.parquet_row_group_size);
 
         parquet_writer_ = std::make_unique<ParquetBatchWriter>(parquet_path, trading_day, config);
-        writers_.push_back(parquet_writer_.get());
-        spdlog::info("Parquet writer initialized at path: {} with ZSTD compression", parquet_path.string());
+        parquet_queue_ = std::make_unique<MarketDataQueue>();
+        spdlog::info("Parquet writer initialized at path: {} with ZSTD compression and {} rows per group",
+                     parquet_path.string(), config.row_group_size);
     }
 #else
     if (mode == StorageMode::PARQUET || mode == StorageMode::HYBRID)
@@ -60,7 +60,6 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         if (!csv_writer_)
         {
             csv_writer_ = std::make_unique<CsvWriter>(csv_path, trading_day);
-            writers_.push_back(csv_writer_.get());
             spdlog::info("CSV writer initialized at path: {}", csv_path.string());
         }
     }
@@ -77,13 +76,19 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     spdlog::info("AsyncFileManager UpdateTime filter configured: startup_time={}, window={}", startup_time_hms_,
                  window_str);
 
+#ifdef CFMDC_ENABLE_PARQUET
+    if (parquet_writer_)
+    {
+        parquet_worker_thread_ = std::jthread([this](std::stop_token st) { parquet_worker_loop(st); });
+    }
+#endif
     worker_thread_ = std::jthread([this](std::stop_token st) { worker_loop(st); });
 
     // Apply thread affinity
-    int actual_core = worker_core;
+    int actual_core = options.worker_core;
     unsigned int hardware_threads = std::thread::hardware_concurrency();
 
-    if (worker_core == -2)
+    if (options.worker_core == -2)
     {
         // Auto-select core: skip core 0 if possible as it handles most interrupts
         if (hardware_threads > 1)
@@ -95,10 +100,10 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
             actual_core = -1; // Single core, no affinity
         }
     }
-    else if (worker_core >= static_cast<int>(hardware_threads))
+    else if (options.worker_core >= static_cast<int>(hardware_threads))
     {
         spdlog::warn("Configured WorkerThreadCore ({}) exceeds available hardware threads ({}), affinity disabled",
-                     worker_core, hardware_threads);
+                     options.worker_core, hardware_threads);
         actual_core = -1;
     }
 
@@ -107,7 +112,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         if (set_thread_affinity(worker_thread_, actual_core))
         {
             spdlog::info("Worker thread pinned to CPU core: {} (mode: {})", actual_core,
-                         worker_core == -2 ? "auto" : "manual");
+                         options.worker_core == -2 ? "auto" : "manual");
         }
         else
         {
@@ -154,16 +159,35 @@ bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data)
 
 bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDataField &data)
 {
-    bool success = true;
-    for (auto *writer : writers_)
+    if (fatal_error_.load(std::memory_order_acquire))
     {
-        if (!writer->write(data))
+        return false;
+    }
+
+    if (csv_writer_)
+    {
+        if (!csv_writer_->write(data))
         {
-            success = false;
-            mark_write_failure("write", data.InstrumentID);
+            mark_write_failure("CSV write", data.InstrumentID);
+            return false;
+        }
+        csv_records_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+#ifdef CFMDC_ENABLE_PARQUET
+    if (parquet_queue_)
+    {
+        while (!parquet_queue_->try_enqueue(data))
+        {
+            if (fatal_error_.load(std::memory_order_acquire))
+            {
+                return false;
+            }
+            std::this_thread::yield();
         }
     }
-    return success;
+#endif
+    return true;
 }
 
 bool AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketDataField &data)
@@ -172,7 +196,6 @@ bool AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketD
     {
         return false;
     }
-    total_records_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -198,6 +221,13 @@ void AsyncFileManager::stop()
     {
         worker_thread_.join();
     }
+#ifdef CFMDC_ENABLE_PARQUET
+    parquet_worker_thread_.request_stop();
+    if (parquet_worker_thread_.joinable())
+    {
+        parquet_worker_thread_.join();
+    }
+#endif
 }
 
 void AsyncFileManager::close_all()
@@ -218,14 +248,18 @@ void AsyncFileManager::close_all()
 bool AsyncFileManager::flush_all()
 {
     bool success = true;
-    for (auto *writer : writers_)
+    if (csv_writer_ && !csv_writer_->flush())
     {
-        if (!writer->flush())
-        {
-            success = false;
-            mark_write_failure("flush");
-        }
+        success = false;
+        mark_write_failure("CSV flush");
     }
+#ifdef CFMDC_ENABLE_PARQUET
+    if (parquet_writer_ && !parquet_writer_->flush())
+    {
+        success = false;
+        mark_write_failure("Parquet flush");
+    }
+#endif
     return success;
 }
 
@@ -233,11 +267,27 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
 {
     // Reads atomics only, safe to call from any thread while the worker runs.
     Statistics stats;
-    stats.total_records = total_records_.load(std::memory_order_relaxed);
+    stats.csv_records = csv_records_.load(std::memory_order_relaxed);
+    stats.parquet_records = parquet_records_.load(std::memory_order_relaxed);
     stats.queue_size = queue_.size();
+#ifdef CFMDC_ENABLE_PARQUET
+    stats.parquet_queue_size = parquet_queue_ ? parquet_queue_->size() : 0;
+#endif
     stats.dropped_records = queue_.overflow_count();
     stats.write_failures = write_failures_.load(std::memory_order_relaxed);
     stats.periodic_flushes = periodic_flushes_.load(std::memory_order_relaxed);
+    switch (storage_mode_)
+    {
+    case StorageMode::CSV:
+        stats.total_records = stats.csv_records;
+        break;
+    case StorageMode::PARQUET:
+        stats.total_records = stats.parquet_records;
+        break;
+    case StorageMode::HYBRID:
+        stats.total_records = (std::min)(stats.csv_records, stats.parquet_records);
+        break;
+    }
     return stats;
 }
 
@@ -362,5 +412,67 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         }
     }
 }
+
+#ifdef CFMDC_ENABLE_PARQUET
+void AsyncFileManager::parquet_worker_loop(std::stop_token st)
+{
+    using namespace std::chrono_literals;
+    constexpr size_t kBatchSize = 64;
+    std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
+
+    auto write_batch = [&](size_t count) {
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (!parquet_writer_->write(batch[i]))
+            {
+                mark_write_failure("Parquet write", batch[i].InstrumentID);
+                return false;
+            }
+            parquet_records_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return true;
+    };
+
+    while (!st.stop_requested() && !fatal_error_.load(std::memory_order_acquire))
+    {
+        size_t count = 0;
+        while (count < kBatchSize && parquet_queue_->try_dequeue(batch[count]))
+        {
+            ++count;
+        }
+        if (count == 0)
+        {
+            std::this_thread::sleep_for(200us);
+            continue;
+        }
+        if (!write_batch(count))
+        {
+            return;
+        }
+    }
+
+    if (fatal_error_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    size_t count = 0;
+    while (parquet_queue_->try_dequeue(batch[count]))
+    {
+        if (++count == kBatchSize)
+        {
+            if (!write_batch(count))
+            {
+                return;
+            }
+            count = 0;
+        }
+    }
+    if (count > 0)
+    {
+        (void)write_batch(count);
+    }
+}
+#endif
 
 } // namespace cfmdc

@@ -49,7 +49,7 @@ class MdSpi : public CThostFtdcMdSpi
     /// @return Request result (0 = success)
     int subscribe_market_data(std::span<char *> instrument_ids);
 
-    /// @brief Wait for the final subscription response callback
+    /// @brief Wait until every requested instrument has a subscription response
     bool wait_for_subscription_completion(std::chrono::seconds timeout);
 
     /// @brief Get the aggregate subscription result

@@ -319,17 +319,21 @@ void Application::subscribe_market_data()
         throw std::runtime_error("Shutdown requested during market data subscription");
     }
 
-    if (!md_spi_->wait_for_subscription_completion(timeout))
-    {
-        throw std::runtime_error("Timed out while waiting for market data subscription responses");
-    }
-
+    const bool completed = md_spi_->wait_for_subscription_completion(timeout);
     const auto result = md_spi_->subscription_result();
-    if (!result.successful())
+    if (!completed && !result.completed)
     {
         throw std::runtime_error(std::format(
-            "Market data subscription incomplete: expected={}, succeeded={}, failed={}, missing={}", result.expected,
-            result.succeeded, result.failed, result.missing));
+            "Timed out while waiting for market data subscription responses: expected={}, succeeded={}, failed={}, "
+            "missing={}",
+            result.expected, result.succeeded, result.failed, result.missing));
+    }
+
+    if (!result.successful())
+    {
+        throw std::runtime_error(
+            std::format("Market data subscription incomplete: expected={}, succeeded={}, failed={}, missing={}",
+                        result.expected, result.succeeded, result.failed, result.missing));
     }
 
     spdlog::info("Confirmed market data subscriptions: {} instruments", result.succeeded);

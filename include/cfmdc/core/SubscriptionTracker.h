@@ -51,6 +51,7 @@ class SubscriptionTracker
 
     void record(std::string_view instrument_id, bool success, bool is_last)
     {
+        bool notify_completion = false;
         {
             std::lock_guard lock(mutex_);
             if (instrument_id.empty())
@@ -60,21 +61,34 @@ class SubscriptionTracker
                     ++unattributed_failures_;
                 }
             }
-            else if (success)
-            {
-                succeeded_.emplace(instrument_id);
-            }
             else
             {
-                failed_.emplace(instrument_id);
+                const std::string instrument_key{instrument_id};
+                if (!expected_.contains(instrument_key))
+                {
+                    // CTP can replay responses from subscriptions restored through
+                    // its flow files. They do not belong to the active request.
+                }
+                else if (success)
+                {
+                    failed_.erase(instrument_key);
+                    succeeded_.emplace(instrument_key);
+                }
+                else
+                {
+                    succeeded_.erase(instrument_key);
+                    failed_.emplace(instrument_key);
+                }
             }
 
-            if (is_last)
+            const auto accounted = succeeded_.size() + failed_.size();
+            if (accounted == expected_.size() || (is_last && unattributed_failures_ != 0))
             {
                 completed_ = true;
+                notify_completion = true;
             }
         }
-        if (is_last)
+        if (notify_completion)
         {
             completion_cv_.notify_all();
         }

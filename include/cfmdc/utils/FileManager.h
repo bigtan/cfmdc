@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -39,7 +40,8 @@ class AsyncFileManager
     explicit AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                               const std::string &trading_day, const std::string &base_action_day,
                               const std::string &next_action_day, const std::string &startup_time_hms, StorageMode mode,
-                              int worker_core = -1);
+                              int worker_core = -1,
+                              std::chrono::milliseconds csv_flush_interval = std::chrono::seconds(5));
 
     /// @brief Destructor
     ~AsyncFileManager();
@@ -84,6 +86,7 @@ class AsyncFileManager
         size_t queue_size{0};      ///< Current queue depth
         size_t dropped_records{0}; ///< Records dropped because the queue was full
         size_t write_failures{0};  ///< Writer-level write failures
+        size_t periodic_flushes{0}; ///< Successful periodic CSV flushes
     };
     Statistics get_statistics() const;
 
@@ -104,6 +107,7 @@ class AsyncFileManager
     std::string startup_time_hms_;
     market_data_time::StartupWindow startup_window_{market_data_time::StartupWindow::Day};
     StorageMode storage_mode_;
+    std::chrono::milliseconds csv_flush_interval_;
 
     std::unique_ptr<CsvWriter> csv_writer_;
 #ifdef CFMDC_ENABLE_PARQUET
@@ -123,6 +127,7 @@ class AsyncFileManager
     // Statistics
     std::atomic<size_t> total_records_{0};
     std::atomic<size_t> write_failures_{0};
+    std::atomic<size_t> periodic_flushes_{0};
     std::atomic<bool> fatal_error_{false};
 };
 

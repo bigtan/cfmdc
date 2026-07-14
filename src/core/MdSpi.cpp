@@ -100,8 +100,9 @@ void MdSpi::log_statistics() const
     }
 
     const auto stats = file_manager->get_statistics();
-    spdlog::info("Market data pipeline: stored={}, queue={}, dropped={}, write_failures={}", stats.total_records,
-                 stats.queue_size, stats.dropped_records, stats.write_failures);
+    spdlog::info("Market data pipeline: stored={}, queue={}, dropped={}, write_failures={}, csv_flushes={}",
+                 stats.total_records, stats.queue_size, stats.dropped_records, stats.write_failures,
+                 stats.periodic_flushes);
 }
 
 bool MdSpi::has_fatal_pipeline_error() const noexcept

@@ -18,9 +18,11 @@ namespace cfmdc
 AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                                    const std::string &trading_day, const std::string &base_action_day,
                                    const std::string &next_action_day, const std::string &startup_time_hms,
-                                   StorageMode mode, int worker_core)
+                                   StorageMode mode, int worker_core, std::chrono::milliseconds csv_flush_interval)
     : csv_path_(csv_path), parquet_path_(parquet_path), trading_day_(trading_day), action_day_base_(base_action_day),
-      action_day_next_(next_action_day), storage_mode_(mode)
+      action_day_next_(next_action_day), storage_mode_(mode),
+      csv_flush_interval_(csv_flush_interval > std::chrono::milliseconds::zero() ? csv_flush_interval
+                                                                                : std::chrono::seconds(5))
 {
     startup_time_hms_ = startup_time_hms;
     if (startup_time_hms_.empty())
@@ -235,6 +237,7 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
     stats.queue_size = queue_.size();
     stats.dropped_records = queue_.overflow_count();
     stats.write_failures = write_failures_.load(std::memory_order_relaxed);
+    stats.periodic_flushes = periodic_flushes_.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -254,13 +257,11 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     // Parquet is intentionally NOT flushed periodically: it would fragment row
     // groups, and without the file footer (written on close) the file is
     // unreadable anyway - Parquet durability relies on graceful shutdown.
-    constexpr auto kCsvFlushInterval = std::chrono::seconds(5);
-
     using clock = std::chrono::steady_clock;
     auto spin_deadline = clock::now() + kSpinBudget;
     auto yield_deadline = spin_deadline + kYieldBudget;
     auto sleep_duration = kSleepMin;
-    auto next_csv_flush = clock::now() + kCsvFlushInterval;
+    auto next_csv_flush = clock::now() + csv_flush_interval_;
     std::uint32_t jitter_state = 0x9e3779b9u;
 
     auto reset_backoff = [&]() {
@@ -276,6 +277,21 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         auto delta = std::chrono::microseconds(static_cast<int64_t>(base.count()) * jitter / 100);
         auto adjusted = base + delta;
         return adjusted < 1us ? 1us : adjusted;
+    };
+
+    auto flush_csv_if_due = [&](clock::time_point now) {
+        if (!csv_writer_ || now < next_csv_flush)
+        {
+            return true;
+        }
+        if (!csv_writer_->flush())
+        {
+            mark_write_failure("periodic flush");
+            return false;
+        }
+        periodic_flushes_.fetch_add(1, std::memory_order_relaxed);
+        next_csv_flush = now + csv_flush_interval_;
+        return true;
     };
 
     auto process_data = [&](CThostFtdcDepthMarketDataField &data) {
@@ -305,21 +321,19 @@ void AsyncFileManager::worker_loop(std::stop_token st)
                     return;
                 }
             }
+            if (!flush_csv_if_due(clock::now()))
+            {
+                return;
+            }
             reset_backoff();
             continue;
         }
 
         auto now = clock::now();
 
-        // Periodic CSV flush while idle so an abnormal exit loses at most a few seconds
-        if (csv_writer_ && now >= next_csv_flush)
+        if (!flush_csv_if_due(now))
         {
-            if (!csv_writer_->flush())
-            {
-                mark_write_failure("periodic flush");
-                return;
-            }
-            next_csv_flush = now + kCsvFlushInterval;
+            return;
         }
 
         if (now < spin_deadline)

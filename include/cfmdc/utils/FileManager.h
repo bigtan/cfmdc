@@ -66,7 +66,8 @@ class AsyncFileManager
     void stop();
 
     /// @brief Close all open files
-    void close_all();
+    /// @return true if every configured writer closed successfully
+    bool close_all();
 
     /// @brief Flush all open files
     /// @return true if every configured writer flushed successfully

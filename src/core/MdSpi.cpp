@@ -133,7 +133,9 @@ bool MdSpi::shutdown()
     if (async_file_manager_)
     {
         async_file_manager_->stop();
-        success = async_file_manager_->flush_all() && !async_file_manager_->has_fatal_error();
+        const bool flushed = async_file_manager_->flush_all();
+        const bool closed = async_file_manager_->close_all();
+        success = flushed && closed && !async_file_manager_->has_fatal_error();
     }
     shutdown_succeeded_.store(success, std::memory_order_release);
     return success;

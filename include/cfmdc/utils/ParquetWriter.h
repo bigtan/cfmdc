@@ -60,6 +60,9 @@ class ParquetMarketDataWriter
     /// @brief Flush buffered data to file
     void flush();
 
+    /// @brief Flush and close the Parquet file
+    bool close();
+
     /// @brief Get number of records written
     size_t record_count() const
     {
@@ -79,6 +82,7 @@ class ParquetMarketDataWriter
 
     Config config_;
     size_t record_count_{0};
+    bool closed_{false};
 };
 
 /// @brief Batch writer for multiple instruments
@@ -111,7 +115,7 @@ class ParquetBatchWriter : public IMarketDataWriter
     bool flush() override;
 
     /// @brief Close writer
-    void close_all();
+    bool close_all();
 
     /// @brief Get total records written
     size_t total_record_count() const;

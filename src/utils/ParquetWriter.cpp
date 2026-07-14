@@ -165,30 +165,52 @@ ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &fi
 
 ParquetMarketDataWriter::~ParquetMarketDataWriter()
 {
+    if (!close())
+    {
+        spdlog::critical("Parquet writer did not close cleanly");
+    }
+}
+
+bool ParquetMarketDataWriter::close()
+{
+    if (closed_)
+    {
+        return true;
+    }
+
+    bool success = true;
     try
     {
         flush();
-        if (impl_->writer)
-        {
-            auto status = impl_->writer->Close();
-            if (!status.ok())
-            {
-                spdlog::error("Failed to close Parquet writer: {}", status.ToString());
-            }
-        }
-        if (impl_->outfile)
-        {
-            auto status = impl_->outfile->Close();
-            if (!status.ok())
-            {
-                spdlog::error("Failed to close output file: {}", status.ToString());
-            }
-        }
     }
     catch (const std::exception &ex)
     {
-        spdlog::error("Error in Parquet writer destructor: {}", ex.what());
+        spdlog::error("Failed to flush Parquet writer during close: {}", ex.what());
+        success = false;
     }
+
+    if (impl_->writer)
+    {
+        auto status = impl_->writer->Close();
+        if (!status.ok())
+        {
+            spdlog::error("Failed to close Parquet writer: {}", status.ToString());
+            success = false;
+        }
+        impl_->writer.reset();
+    }
+    if (impl_->outfile)
+    {
+        auto status = impl_->outfile->Close();
+        if (!status.ok())
+        {
+            spdlog::error("Failed to close output file: {}", status.ToString());
+            success = false;
+        }
+        impl_->outfile.reset();
+    }
+    closed_ = true;
+    return success;
 }
 
 void ParquetMarketDataWriter::initialize_schema()
@@ -563,7 +585,10 @@ ParquetBatchWriter::ParquetBatchWriter(const std::filesystem::path &base_path, c
 
 ParquetBatchWriter::~ParquetBatchWriter()
 {
-    close_all();
+    if (!close_all())
+    {
+        spdlog::critical("Parquet batch writer did not close cleanly");
+    }
     spdlog::info("ParquetBatchWriter closed. Data saved to: {}", current_file_path_.string());
 }
 
@@ -601,9 +626,15 @@ bool ParquetBatchWriter::flush()
     }
 }
 
-void ParquetBatchWriter::close_all()
+bool ParquetBatchWriter::close_all()
 {
-    writer_.reset(); // Destructor will close and flush
+    if (!writer_)
+    {
+        return true;
+    }
+    const bool success = writer_->close();
+    writer_.reset();
+    return success;
 }
 
 size_t ParquetBatchWriter::total_record_count() const

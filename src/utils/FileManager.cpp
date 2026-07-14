@@ -124,7 +124,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
 AsyncFileManager::~AsyncFileManager()
 {
     stop();
-    close_all();
+    (void)close_all();
 }
 
 bool AsyncFileManager::write_market_data_async(const CThostFtdcDepthMarketDataField &data)
@@ -230,19 +230,23 @@ void AsyncFileManager::stop()
 #endif
 }
 
-void AsyncFileManager::close_all()
+bool AsyncFileManager::close_all()
 {
-    if (csv_writer_)
+    bool success = true;
+    if (csv_writer_ && !csv_writer_->close_all())
     {
-        csv_writer_->close_all();
+        success = false;
+        mark_write_failure("CSV close");
     }
 
 #ifdef CFMDC_ENABLE_PARQUET
-    if (parquet_writer_)
+    if (parquet_writer_ && !parquet_writer_->close_all())
     {
-        parquet_writer_->close_all();
+        success = false;
+        mark_write_failure("Parquet close");
     }
 #endif
+    return success;
 }
 
 bool AsyncFileManager::flush_all()

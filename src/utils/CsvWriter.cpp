@@ -19,7 +19,10 @@ CsvWriter::CsvWriter(const std::filesystem::path &base_path, const std::string &
 
 CsvWriter::~CsvWriter()
 {
-    close_all();
+    if (!close_all())
+    {
+        spdlog::critical("Failed to close one or more CSV files");
+    }
 }
 
 bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
@@ -54,16 +57,19 @@ bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
     return file->good();
 }
 
-void CsvWriter::close_all()
+bool CsvWriter::close_all()
 {
+    bool success = true;
     for (auto &[instrument_id, file] : file_handles_)
     {
         if (file && file->is_open())
         {
             file->close();
+            success = file->good() && success;
         }
     }
     file_handles_.clear();
+    return success;
 }
 
 bool CsvWriter::flush()

@@ -45,7 +45,8 @@ class CsvWriter : public IMarketDataWriter
     bool flush() override;
 
     /// @brief Close all open files
-    void close_all();
+    /// @return true if every stream closed successfully
+    bool close_all();
 
     /// @brief Get number of open CSV files
     size_t file_count() const

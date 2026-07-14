@@ -1,6 +1,9 @@
+#include <atomic>
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
+#include <cstdint>
 #include <thread>
-#include <vector>
 
 #include "cfmdc/utils/LockFreeQueue.h"
 
@@ -40,13 +43,14 @@ TEST_CASE("LockFreeQueue basic operations", "[lockfreequeue]")
 
     SECTION("Queue full")
     {
-        // Size is 8, but can only hold 7 items (ring buffer implementation)
-        for (int i = 0; i < 7; ++i)
+        for (int i = 0; i < 8; ++i)
         {
             REQUIRE(queue.try_enqueue(i));
         }
 
+        REQUIRE(queue.size() == queue.capacity());
         REQUIRE_FALSE(queue.try_enqueue(999)); // Should fail when full
+        REQUIRE(queue.overflow_count() == 1);
     }
 
     SECTION("Queue empty")
@@ -94,8 +98,9 @@ TEST_CASE("LockFreeQueue with complex types", "[lockfreequeue]")
 TEST_CASE("LockFreeQueue thread safety (SPSC)", "[lockfreequeue][concurrency]")
 {
     LockFreeQueue<int, 1024> queue;
-    const int num_items = 1000;
+    constexpr int num_items = 250000;
     std::atomic<bool> done{false};
+    std::atomic<bool> sequence_valid{true};
 
     SECTION("Single producer, single consumer")
     {
@@ -119,7 +124,10 @@ TEST_CASE("LockFreeQueue thread safety (SPSC)", "[lockfreequeue][concurrency]")
             {
                 if (queue.try_dequeue(value))
                 {
-                    REQUIRE(value == count);
+                    if (value != count)
+                    {
+                        sequence_valid.store(false, std::memory_order_relaxed);
+                    }
                     ++count;
                 }
                 else
@@ -134,6 +142,7 @@ TEST_CASE("LockFreeQueue thread safety (SPSC)", "[lockfreequeue][concurrency]")
 
         REQUIRE(queue.empty());
         REQUIRE(done.load());
+        REQUIRE(sequence_valid.load());
     }
 }
 
@@ -143,26 +152,28 @@ TEST_CASE("LockFreeQueue performance characteristics", "[lockfreequeue][benchmar
 
     SECTION("Sequential enqueue/dequeue performance")
     {
-        const int iterations = 10000;
+        constexpr int iterations = 1000000;
+        bool operations_succeeded = true;
+        std::int64_t checksum = 0;
 
-        auto start = std::chrono::high_resolution_clock::now();
+        const auto start = std::chrono::steady_clock::now();
 
         for (int i = 0; i < iterations; ++i)
         {
-            queue.try_enqueue(i);
+            operations_succeeded = queue.try_enqueue(i) && operations_succeeded;
+            int value = 0;
+            operations_succeeded = queue.try_dequeue(value) && operations_succeeded;
+            checksum += value;
         }
 
-        int value;
-        for (int i = 0; i < iterations; ++i)
-        {
-            queue.try_dequeue(value);
-        }
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        const auto seconds = std::chrono::duration<double>(elapsed).count();
+        const auto operations_per_second = static_cast<double>(iterations) * 2.0 / seconds;
+        INFO("sequential queue operations per second: " << operations_per_second);
 
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-        // Just verify it completed successfully
+        REQUIRE(operations_succeeded);
+        REQUIRE(checksum == static_cast<std::int64_t>(iterations - 1) * iterations / 2);
         REQUIRE(queue.empty());
-        REQUIRE(duration.count() > 0); // Sanity check
+        REQUIRE(seconds > 0.0);
     }
 }

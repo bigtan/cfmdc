@@ -28,16 +28,14 @@ template <typename T, size_t Size> class LockFreeQueue
     bool try_enqueue(const T &item) noexcept(std::is_nothrow_copy_assignable_v<T>)
     {
         const size_t current_tail = tail_.load(std::memory_order_relaxed);
-        const size_t next_tail = (current_tail + 1) & (Size - 1);
-
-        if (next_tail == head_.load(std::memory_order_acquire))
+        if (current_tail - head_.load(std::memory_order_acquire) >= Size)
         {
             overflow_count_.fetch_add(1, std::memory_order_relaxed);
             return false; // Queue is full
         }
 
-        buffer_[current_tail] = item;
-        tail_.store(next_tail, std::memory_order_release);
+        buffer_[current_tail & (Size - 1)] = item;
+        tail_.store(current_tail + 1, std::memory_order_release);
         return true;
     }
 
@@ -47,16 +45,14 @@ template <typename T, size_t Size> class LockFreeQueue
     bool try_enqueue(T &&item) noexcept(std::is_nothrow_move_assignable_v<T>)
     {
         const size_t current_tail = tail_.load(std::memory_order_relaxed);
-        const size_t next_tail = (current_tail + 1) & (Size - 1);
-
-        if (next_tail == head_.load(std::memory_order_acquire))
+        if (current_tail - head_.load(std::memory_order_acquire) >= Size)
         {
             overflow_count_.fetch_add(1, std::memory_order_relaxed);
             return false; // Queue is full
         }
 
-        buffer_[current_tail] = std::move(item);
-        tail_.store(next_tail, std::memory_order_release);
+        buffer_[current_tail & (Size - 1)] = std::move(item);
+        tail_.store(current_tail + 1, std::memory_order_release);
         return true;
     }
 
@@ -84,8 +80,8 @@ template <typename T, size_t Size> class LockFreeQueue
             return false; // Queue is empty
         }
 
-        item = buffer_[current_head];
-        head_.store((current_head + 1) & (Size - 1), std::memory_order_release);
+        item = buffer_[current_head & (Size - 1)];
+        head_.store(current_head + 1, std::memory_order_release);
         return true;
     }
 
@@ -95,7 +91,7 @@ template <typename T, size_t Size> class LockFreeQueue
     {
         const size_t head = head_.load(std::memory_order_acquire);
         const size_t tail = tail_.load(std::memory_order_acquire);
-        return (tail - head) & (Size - 1);
+        return tail - head;
     }
 
     /// @brief Check if queue is empty
@@ -103,6 +99,12 @@ template <typename T, size_t Size> class LockFreeQueue
     bool empty() const noexcept
     {
         return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire);
+    }
+
+    /// @brief Get the usable queue capacity
+    static constexpr size_t capacity() noexcept
+    {
+        return Size;
     }
 
   private:

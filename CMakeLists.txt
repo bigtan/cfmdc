@@ -22,7 +22,7 @@ endif()
 
 include(FindVCPKG)
 
-set(CFMDC_PROJECT_VERSION "0.1.2")
+set(CFMDC_PROJECT_VERSION "0.1.3")
 option(CFMDC_ENABLE_PARQUET "Enable Parquet storage support" ON)
 if(CFMDC_ENABLE_PARQUET)
     list(APPEND VCPKG_MANIFEST_FEATURES parquet)

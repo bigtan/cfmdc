@@ -7,6 +7,7 @@
 #include <format>
 #include <optional>
 #include <ranges>
+#include <utility>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -182,7 +183,24 @@ void Config::parse_front_servers()
 
             try
             {
-                front_servers_.push_back(build_server(*server_table));
+                auto server = build_server(*server_table);
+                if (!front_servers_.empty())
+                {
+                    const auto &baseline = front_servers_.front();
+                    const bool same_account =
+                        server.broker_id() == baseline.broker_id() && server.user_id() == baseline.user_id() &&
+                        server.password() == baseline.password() &&
+                        server.user_product_info() == baseline.user_product_info() &&
+                        server.auth_code() == baseline.auth_code() && server.app_id() == baseline.app_id();
+                    if (!same_account)
+                    {
+                        throw ConfigException(std::format(
+                            "Front[{}] account and authentication fields must match Front[0] because Front entries "
+                            "are redundant endpoints",
+                            i));
+                    }
+                }
+                front_servers_.push_back(std::move(server));
             }
             catch (const ConfigException &e)
             {

@@ -128,12 +128,12 @@ AppID = "test_app"
 [[Front]]
 MD_Url = "tcp://server2.com:10131"
 TD_Url = "tcp://server2.com:10130"
-BrokerID = "8888"
-UserID = "test_user2"
-Password = "test_pass2"
-UserProductInfo = "test_product2"
-AuthCode = "test_auth2"
-AppID = "test_app2"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
 
 [History]
 CSVPath = "./test_data/csv"
@@ -150,6 +150,39 @@ SubList = "rb2505|IC2501"
     REQUIRE(config.front_servers()[1].md_url() == "tcp://server2.com:10131");
     REQUIRE(config.subscription_list() == "rb2505|IC2501");
 
+    std::filesystem::remove(test_config);
+}
+
+TEST_CASE("Config rejects different accounts across redundant fronts", "[config]")
+{
+    const std::string test_config = "test_config_front_account_mismatch.toml";
+    write_config_file(test_config, R"(
+[[Front]]
+MD_Url = "tcp://server1.com:10131"
+TD_Url = "tcp://server1.com:10130"
+BrokerID = "9999"
+UserID = "account_a"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[[Front]]
+MD_Url = "tcp://server2.com:10131"
+TD_Url = "tcp://server2.com:10130"
+BrokerID = "9999"
+UserID = "account_b"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+CSVPath = "./test_data/csv"
+StorageMode = "CSV"
+)");
+
+    REQUIRE_THROWS_AS(Config(test_config), ConfigException);
     std::filesystem::remove(test_config);
 }
 

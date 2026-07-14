@@ -303,7 +303,7 @@ void Application::subscribe_market_data()
     {
         if (md_spi_->subscribe_market_data(c_strings) == 0)
         {
-            return;
+            break;
         }
 
         if (std::chrono::steady_clock::now() - start_time >= timeout)
@@ -314,7 +314,25 @@ void Application::subscribe_market_data()
         std::this_thread::sleep_for(SLEEP_DURATION);
     }
 
-    throw std::runtime_error("Shutdown requested during market data subscription");
+    if (g_shutdown_requested.load(std::memory_order_acquire))
+    {
+        throw std::runtime_error("Shutdown requested during market data subscription");
+    }
+
+    if (!md_spi_->wait_for_subscription_completion(timeout))
+    {
+        throw std::runtime_error("Timed out while waiting for market data subscription responses");
+    }
+
+    const auto result = md_spi_->subscription_result();
+    if (!result.successful())
+    {
+        throw std::runtime_error(std::format(
+            "Market data subscription incomplete: expected={}, succeeded={}, failed={}, missing={}", result.expected,
+            result.succeeded, result.failed, result.missing));
+    }
+
+    spdlog::info("Confirmed market data subscriptions: {} instruments", result.succeeded);
 }
 
 WaitStatus Application::wait_for_ready(const std::function<bool()> &ready_check, std::string_view operation)

@@ -39,7 +39,18 @@ int MdSpi::subscribe_market_data(std::span<char *> instrument_ids)
         spdlog::error("SubscribeMarketData called with empty instrument list");
         return -1;
     }
+    subscription_tracker_.begin(instrument_ids);
     return md_api_->SubscribeMarketData(instrument_ids.data(), static_cast<int>(instrument_ids.size()));
+}
+
+bool MdSpi::wait_for_subscription_completion(std::chrono::seconds timeout)
+{
+    return subscription_tracker_.wait_for_completion(timeout);
+}
+
+SubscriptionTracker::Result MdSpi::subscription_result() const
+{
+    return subscription_tracker_.result();
 }
 
 void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, const std::string &base_action_day,
@@ -169,24 +180,27 @@ void MdSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtd
 }
 
 void MdSpi::OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstrument, CThostFtdcRspInfoField *pRspInfo,
-                               int /*nRequestID*/, bool /*bIsLast*/)
+                               int /*nRequestID*/, bool bIsLast)
 {
     auto error = check_response(pRspInfo);
+    const std::string_view instrument_id = pSpecificInstrument ? pSpecificInstrument->InstrumentID : "";
+    subscription_tracker_.record(instrument_id, !error.is_error(), bIsLast);
+
     if (!error.is_error())
     {
         if (pSpecificInstrument)
         {
-            spdlog::info("Market data subscription successful...");
-            spdlog::info("Instrument code: {} subscribed successfully", pSpecificInstrument->InstrumentID);
+            spdlog::debug("Instrument {} subscribed successfully", pSpecificInstrument->InstrumentID);
         }
-        else
+        else if (!bIsLast)
         {
-            spdlog::info("Market data subscription callback completed without instrument payload");
+            spdlog::warn("Subscription callback succeeded without instrument payload");
         }
     }
     else
     {
-        spdlog::error("Subscription error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
+        spdlog::error("Subscription error for {} - ErrorID: {}, ErrorMsg: {}",
+                      instrument_id.empty() ? "<unknown>" : instrument_id, error.error_id(), error.error_msg());
     }
 }
 

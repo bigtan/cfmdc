@@ -3,12 +3,14 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
 
 #include "cfmdc/config/Config.h"
+#include "cfmdc/core/SubscriptionTracker.h"
 #include "cfmdc/types/FrontServer.h"
 #include "cfmdc/utils/ApiWrapper.h"
 #include "cfmdc/utils/FileManager.h"
@@ -46,6 +48,12 @@ class MdSpi : public CThostFtdcMdSpi
     /// @param instrument_ids Span of instrument IDs
     /// @return Request result (0 = success)
     int subscribe_market_data(std::span<char *> instrument_ids);
+
+    /// @brief Wait for the final subscription response callback
+    bool wait_for_subscription_completion(std::chrono::seconds timeout);
+
+    /// @brief Get the aggregate subscription result
+    SubscriptionTracker::Result subscription_result() const;
 
     /// @brief Check if market data connection is ready
     /// @return true if logged in
@@ -94,6 +102,7 @@ class MdSpi : public CThostFtdcMdSpi
     std::string action_day_base_;
     std::string action_day_next_;
     std::atomic<bool> is_ready_{false};
+    SubscriptionTracker subscription_tracker_;
     std::atomic<bool> shutdown_started_{false};
     std::atomic<bool> shutdown_succeeded_{true};
 };

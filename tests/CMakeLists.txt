@@ -13,6 +13,7 @@ set(TEST_SOURCES
     test_file_manager.cpp
     test_lock_free_queue.cpp
     test_market_data_time_policy.cpp
+    test_subscription_tracker.cpp
 )
 
 # 3. 引入测试依赖的实现文件

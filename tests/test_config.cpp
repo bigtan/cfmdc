@@ -30,7 +30,6 @@ Password = "test_pass"
 UserProductInfo = "test_product"
 AuthCode = "test_auth"
 AppID = "test_app"
-SubList = "null"
 
 [History]
 CSVPath = "./test_data/csv"
@@ -39,6 +38,7 @@ StorageMode = "CSV"
 
 [Application]
 InitTimeout = 30
+SubList = "null"
 )");
 
     SECTION("Valid config loads successfully")
@@ -84,6 +84,31 @@ ParquetPath = "./test_data/parquet"
         REQUIRE_THROWS_AS(Config(test_config), ConfigException);
         std::filesystem::remove(test_config);
     }
+
+    SECTION("Application SubList must be a string")
+    {
+        write_config_file(test_config, R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+CSVPath = "./test_data/csv"
+StorageMode = "CSV"
+
+[Application]
+SubList = 123
+)");
+
+        REQUIRE_THROWS_AS(Config(test_config), ConfigException);
+        std::filesystem::remove(test_config);
+    }
 }
 
 TEST_CASE("Config supports multiple servers", "[config]")
@@ -99,7 +124,6 @@ Password = "test_pass"
 UserProductInfo = "test_product"
 AuthCode = "test_auth"
 AppID = "test_app"
-SubList = "null"
 
 [[Front]]
 MD_Url = "tcp://server2.com:10131"
@@ -110,18 +134,21 @@ Password = "test_pass2"
 UserProductInfo = "test_product2"
 AuthCode = "test_auth2"
 AppID = "test_app2"
-SubList = "null"
 
 [History]
 CSVPath = "./test_data/csv"
 ParquetPath = "./test_data/parquet"
 StorageMode = "Parquet"
+
+[Application]
+SubList = "rb2505|IC2501"
 )");
 
     Config config(test_config);
     REQUIRE(config.front_servers().size() == 2);
     REQUIRE(config.front_servers()[0].md_url() == "tcp://server1.com:10131");
     REQUIRE(config.front_servers()[1].md_url() == "tcp://server2.com:10131");
+    REQUIRE(config.subscription_list() == "rb2505|IC2501");
 
     std::filesystem::remove(test_config);
 }
@@ -184,9 +211,43 @@ ParquetPath = "./data/parquet"
         std::filesystem::remove(test_config);
     }
 
-    SECTION("FlowPath and SubList are read when explicitly configured")
+    SECTION("Application options are read when explicitly configured")
     {
         const std::string test_config = "test_config_app_options.toml";
+        write_config_file(test_config, R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "test_user"
+Password = "test_pass"
+UserProductInfo = "test_product"
+AuthCode = "test_auth"
+AppID = "test_app"
+
+[History]
+CSVPath = "./data/csv"
+ParquetPath = "./data/parquet"
+StorageMode = "Hybrid"
+
+[Application]
+FlowPath = "./custom-flow"
+InitTimeout = 90
+SubList = "rb2505|IC2501"
+)");
+
+        Config config(test_config);
+        REQUIRE(config.flow_path().generic_string() == "./custom-flow");
+        REQUIRE(config.init_timeout() == 90);
+        REQUIRE(config.subscription_list() == "rb2505|IC2501");
+        REQUIRE(config.storage_mode() == StorageMode::HYBRID);
+
+        std::filesystem::remove(test_config);
+    }
+
+    SECTION("Legacy Front SubList remains a compatibility fallback")
+    {
+        const std::string test_config = "test_config_legacy_sublist.toml";
         write_config_file(test_config, R"(
 [Front]
 MD_Url = "tcp://test.com:10131"
@@ -202,18 +263,11 @@ SubList = "rb2505|IC2501"
 [History]
 CSVPath = "./data/csv"
 ParquetPath = "./data/parquet"
-StorageMode = "Hybrid"
-
-[Application]
-FlowPath = "./custom-flow"
-InitTimeout = 90
+StorageMode = "CSV"
 )");
 
         Config config(test_config);
-        REQUIRE(config.flow_path().generic_string() == "./custom-flow");
-        REQUIRE(config.init_timeout() == 90);
         REQUIRE(config.subscription_list() == "rb2505|IC2501");
-        REQUIRE(config.storage_mode() == StorageMode::HYBRID);
 
         std::filesystem::remove(test_config);
     }

@@ -14,7 +14,6 @@
 # UserProductInfo = "your_product_info"
 # AuthCode = "your_auth_code"
 # AppID = "your_app_id"
-# SubList = "null" # Instrument subscription list, use "|" as delimiter, "null" means subscribe all
 
 # Example 2: Multiple servers (recommended for production)
 [[Front]]
@@ -26,7 +25,6 @@ Password = "your_password"
 UserProductInfo = "your_product_info"
 AuthCode = "your_auth_code"
 AppID = "your_app_id"
-SubList = "null"
 
 [[Front]]
 MD_Url = "tcp://180.168.146.187:10211" # Backup market data front
@@ -37,7 +35,6 @@ Password = "your_password"
 UserProductInfo = "your_product_info"
 AuthCode = "your_auth_code"
 AppID = "your_app_id"
-SubList = "null"
 
 [History]
 StorageMode = "Parquet" # Storage format: CSV, Parquet, or Hybrid
@@ -59,6 +56,7 @@ ParquetPath = "./data/parquet/{tradingday}" # Used when StorageMode is Parquet o
 [Application]
 InitTimeout = 60 # Initialization timeout in seconds (default: 60)
 FlowPath = "./flow" # CTP API flow file directory (default: "./flow")
+SubList = "null" # Global instrument list: "null" = all, or "rb2505|IC2501"
 
 # Worker thread CPU affinity (Thread Pinning)
 # This settings binds the high-performance async writer thread to a specific CPU core.

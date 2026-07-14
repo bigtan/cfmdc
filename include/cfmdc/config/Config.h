@@ -33,8 +33,9 @@ class Config
         return front_servers_;
     }
 
-    /// @brief Get subscription list from first server (for backward
-    /// compatibility)
+    /// @brief Get the application-wide instrument subscription list
+    /// @details Reads Application.SubList. Front.SubList is accepted as a
+    ///          deprecated fallback for backward compatibility.
     /// @return Subscription list or "null" if not specified
     std::string subscription_list() const;
 

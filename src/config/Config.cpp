@@ -63,6 +63,16 @@ void Config::validate_config()
         throw ConfigException("Missing 'History' section in configuration");
     }
 
+    auto application = config_["Application"];
+    if (application && !application.is_table())
+    {
+        throw ConfigException("Invalid 'Application' section in configuration");
+    }
+    if (auto app = application.as_table(); app && app->contains("SubList") && !(*app)["SubList"].is_string())
+    {
+        throw ConfigException("Application.SubList must be a string");
+    }
+
     // Check history paths - only the ones the configured storage mode actually uses
     auto history_table = *history.as_table();
     const auto mode = storage_mode();
@@ -146,7 +156,6 @@ void Config::parse_front_servers()
             return *value;
         };
 
-        auto sublist = table["SubList"].value<std::string>().value_or("null");
         return FrontServer::Builder()
             .md_url(get_required("MD_Url"))
             .td_url(get_required("TD_Url"))
@@ -156,7 +165,6 @@ void Config::parse_front_servers()
             .user_product_info(get_required("UserProductInfo"))
             .auth_code(get_required("AuthCode"))
             .app_id(get_required("AppID"))
-            .subscription_list(sublist)
             .build();
     };
 
@@ -200,10 +208,41 @@ void Config::parse_front_servers()
 
 std::string Config::subscription_list() const
 {
-    if (!front_servers_.empty())
+    if (auto app = config_["Application"].as_table())
     {
-        return front_servers_[0].subscription_list();
+        if (auto sub_list = (*app)["SubList"].value<std::string>())
+        {
+            return *sub_list;
+        }
+        if ((*app).contains("SubList"))
+        {
+            throw ConfigException("Application.SubList must be a string");
+        }
     }
+
+    // Backward-compatible migration path for configurations created before
+    // SubList became an application-wide option.
+    const toml::table *legacy_front = nullptr;
+    auto front = config_["Front"];
+    if (auto front_array = front.as_array(); front_array && !front_array->empty())
+    {
+        legacy_front = (*front_array)[0].as_table();
+    }
+    else
+    {
+        legacy_front = front.as_table();
+    }
+
+    if (legacy_front && legacy_front->contains("SubList"))
+    {
+        if (auto sub_list = (*legacy_front)["SubList"].value<std::string>())
+        {
+            spdlog::warn("Front.SubList is deprecated; move it to Application.SubList");
+            return *sub_list;
+        }
+        throw ConfigException("Front.SubList must be a string");
+    }
+
     return "null";
 }
 

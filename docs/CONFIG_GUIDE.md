@@ -15,7 +15,6 @@ Password = "your_password"
 UserProductInfo = "your_product_info"
 AuthCode = "your_auth_code"
 AppID = "your_app_id"
-SubList = "null"
 
 [History]
 StorageMode = "Parquet"
@@ -25,6 +24,7 @@ ParquetPath = "./data/parquet/{tradingday}"
 [Application]
 InitTimeout = 60
 FlowPath = "./flow"
+SubList = "null"
 ```
 
 ## 2. Front（前置服务器）
@@ -37,6 +37,8 @@ FlowPath = "./flow"
 - 多服务器（Array of Tables）：`[[Front]]`
 
 多服务器会按顺序重试，直到成功。
+各项表示同一账户的冗余 TD/MD 接入地址，TD 与 MD 会分别选择首个可用前置；
+账户信息应保持一致，订阅策略统一由 `Application.SubList` 配置。
 
 ### 2.2 必填字段
 
@@ -50,13 +52,6 @@ FlowPath = "./flow"
 - `UserProductInfo`
 - `AuthCode`
 - `AppID`
-
-### 2.3 可选字段
-
-- `SubList`: 订阅合约列表
-  - `"null"`: 订阅全部（默认）
-  - `"rb2505|IC2501"`: 订阅指定合约（`|` 分隔）
-  - `""`: 不订阅任何合约
 
 ## 3. History（存储配置）
 
@@ -98,6 +93,16 @@ ParquetPath = "./data/{year}/{month}/parquet/{tradingday}"
 ### 4.2 FlowPath
 
 CTP 流文件路径，默认 `./flow`。若目录不存在会自动创建。
+
+### 4.3 SubList
+
+应用全局订阅合约列表，不属于单个 Front：
+
+- `"null"` 或省略：订阅全部期货合约
+- `"rb2505|IC2501"`：订阅指定合约（`|` 分隔）
+
+旧版配置中的 `Front.SubList` 暂时仍可读取，但会产生迁移告警；新配置应统一使用
+`Application.SubList`。
 
 ## 5. 版本与配置边界
 

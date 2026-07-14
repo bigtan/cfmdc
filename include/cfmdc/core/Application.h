@@ -58,7 +58,6 @@ class Application
     std::unique_ptr<Config> config_;
     std::unique_ptr<TraderSpi> trader_spi_;
     std::unique_ptr<MdSpi> md_spi_;
-    size_t current_server_index_ = 0;
 };
 
 } // namespace cfmdc

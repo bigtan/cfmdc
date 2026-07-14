@@ -133,7 +133,7 @@ void Application::run()
     }
 
     spdlog::info("Shutdown signal received, cleaning up SPIs and file managers...");
-    
+
     // Explicitly reset in reverse order of initialization
     md_spi_.reset();
     trader_spi_.reset();
@@ -358,7 +358,6 @@ bool Application::init_trader_with_retry()
             if (status == WaitStatus::Success)
             {
                 spdlog::info("Trader initialized successfully with server {}: {}", i + 1, server.td_url());
-                current_server_index_ = i;
                 return true;
             }
             else if (status == WaitStatus::Interrupted)

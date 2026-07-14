@@ -89,7 +89,6 @@ Password = "your_password"
 UserProductInfo = "your_product_info"
 AuthCode = "your_auth_code"
 AppID = "your_app_id"
-SubList = "null" # "null" = all, or "rb2505|IC2501"
 
 [History]
 StorageMode = "Parquet"
@@ -99,6 +98,7 @@ ParquetPath = "./data/parquet/{tradingday}"
 [Application]
 InitTimeout = 60
 FlowPath = "./flow"
+SubList = "null" # "null" = all, or "rb2505|IC2501"
 ```
 
 Placeholders supported in `CSVPath` and `ParquetPath`:

@@ -69,12 +69,6 @@ class FrontServer
             return *this;
         }
 
-        Builder &subscription_list(std::string list)
-        {
-            subscription_list_ = std::move(list);
-            return *this;
-        }
-
         /// @brief Build and validate the FrontServer
         /// @return Validated FrontServer instance
         /// @throws ConfigException if validation fails
@@ -129,8 +123,6 @@ class FrontServer
         std::string user_product_info_;
         std::string auth_code_;
         std::string app_id_;
-        std::string subscription_list_;
-
         friend class FrontServer;
     };
 
@@ -167,11 +159,6 @@ class FrontServer
     {
         return app_id_;
     }
-    const std::string &subscription_list() const noexcept
-    {
-        return subscription_list_;
-    }
-
     /// @brief Validate the server configuration
     /// @return true if all required fields are non-empty
     bool validate() const noexcept
@@ -184,7 +171,7 @@ class FrontServer
     explicit FrontServer(const Builder &builder)
         : md_url_(builder.md_url_), td_url_(builder.td_url_), broker_id_(builder.broker_id_),
           user_id_(builder.user_id_), password_(builder.password_), user_product_info_(builder.user_product_info_),
-          auth_code_(builder.auth_code_), app_id_(builder.app_id_), subscription_list_(builder.subscription_list_)
+          auth_code_(builder.auth_code_), app_id_(builder.app_id_)
     {
     }
 
@@ -196,7 +183,6 @@ class FrontServer
     std::string user_product_info_;
     std::string auth_code_;
     std::string app_id_;
-    std::string subscription_list_;
 };
 
 } // namespace cfmdc

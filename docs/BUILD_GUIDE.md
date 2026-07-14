@@ -81,6 +81,7 @@ cmake --build build
 ```
 
 此时仅允许 `StorageMode=CSV`；配置为 Parquet/Hybrid 会在启动阶段明确失败。
+vcpkg 也不会安装 Arrow/Parquet 依赖。
 
 ## 6. 运行与安装
 

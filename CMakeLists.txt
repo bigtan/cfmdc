@@ -23,6 +23,11 @@ endif()
 include(FindVCPKG)
 
 set(CFMDC_PROJECT_VERSION "0.1.2")
+option(CFMDC_ENABLE_PARQUET "Enable Parquet storage support" ON)
+if(CFMDC_ENABLE_PARQUET)
+    list(APPEND VCPKG_MANIFEST_FEATURES parquet)
+endif()
+
 project(cfmdc VERSION ${CFMDC_PROJECT_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -129,7 +134,6 @@ find_package(tomlplusplus CONFIG REQUIRED)
 find_package(cxxopts CONFIG REQUIRED)
 
 # 可选：Parquet 支持
-option(CFMDC_ENABLE_PARQUET "Enable Parquet storage support" ON)
 if(CFMDC_ENABLE_PARQUET)
     find_package(Arrow CONFIG REQUIRED)
     find_package(Parquet CONFIG REQUIRED)

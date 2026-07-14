@@ -1,25 +1,34 @@
 {
+  "name": "cfmdc",
+  "version-string": "0.1.2",
   "dependencies": [
-    {
-      "name": "arrow",
-      "features": [
-        "filesystem",
-        "parquet"
-      ],
-      "platform": "staticcrt"
-    },
-    {
-      "name": "arrow",
-      "features": [
-        "filesystem",
-        "parquet",
-        "mimalloc"
-      ],
-      "platform": "!staticcrt"
-    },
     "cxxopts",
     "spdlog",
     "tomlplusplus",
     "catch2"
-  ]
+  ],
+  "features": {
+    "parquet": {
+      "description": "Enable Arrow and Parquet storage dependencies",
+      "dependencies": [
+        {
+          "name": "arrow",
+          "features": [
+            "filesystem",
+            "parquet"
+          ],
+          "platform": "staticcrt"
+        },
+        {
+          "name": "arrow",
+          "features": [
+            "filesystem",
+            "parquet",
+            "mimalloc"
+          ],
+          "platform": "!staticcrt"
+        }
+      ]
+    }
+  }
 }

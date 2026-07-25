@@ -102,7 +102,9 @@ AsyncFileManager::worker_loop
 
 ## 7. 可靠性与可用性
 
-- Trader/Md 初始化支持多前置轮询重试
+- Trader/Md 初始化支持多前置顺序重试
+- Trader/Md 初始化使用 `Pending -> Ready/Failed` 显式状态，通过回调发布完成结果
+- 认证、登录或结算确认明确失败时立即切换下一前置，未收到终态时由超时机制兜底
 - 初始化超时由 `Application.InitTimeout` 控制
 - 支持 SIGINT/SIGTERM 优雅退出
 

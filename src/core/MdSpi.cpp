@@ -1,6 +1,7 @@
 #include "cfmdc/core/MdSpi.h"
 
 #include <chrono>
+#include <format>
 
 #include "cfmdc/utils/Constants.h"
 
@@ -142,7 +143,7 @@ void MdSpi::OnFrontConnected()
     safe_strcpy(login_req.UserID, server_.user_id());
     safe_strcpy(login_req.Password, server_.password());
 
-    int rt = md_api_->ReqUserLogin(&login_req, DEFAULT_REQUEST_ID);
+    const int rt = md_api_->ReqUserLogin(&login_req, DEFAULT_REQUEST_ID);
     if (rt == 0)
     {
         spdlog::info("Login request sent successfully...");
@@ -150,6 +151,7 @@ void MdSpi::OnFrontConnected()
     else
     {
         spdlog::error("Failed to send login request, error code: {}", rt);
+        initialization_tracker_.mark_failed(rt, std::format("Failed to send market data login request ({})", rt));
     }
 }
 
@@ -162,6 +164,7 @@ void MdSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtd
         if (!pRspUserLogin)
         {
             spdlog::error("Market data login response succeeded but payload is null");
+            initialization_tracker_.mark_failed(-1, "Market data login response payload is null");
             return;
         }
 
@@ -173,11 +176,13 @@ void MdSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtd
 
         // Note: trading_day_ and async_file_manager_ will be set by Application
         // using the authoritative TradingDay from TraderSpi via set_trading_day_and_action_days()
-        is_ready_.store(true, std::memory_order_release);
+        initialization_tracker_.mark_ready();
     }
     else
     {
         spdlog::error("Login error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
+        initialization_tracker_.mark_failed(error.error_id(),
+                                            std::format("Market data login failed: {}", error.error_msg()));
     }
 }
 

@@ -1,5 +1,7 @@
 #include "cfmdc/core/TraderSpi.h"
 
+#include <format>
+
 #include "cfmdc/utils/Constants.h"
 
 namespace cfmdc
@@ -78,7 +80,7 @@ void TraderSpi::OnFrontConnected()
     safe_strcpy(authenticate_field.AuthCode, server_.auth_code());
     safe_strcpy(authenticate_field.AppID, server_.app_id());
 
-    int rt = trader_api_->ReqAuthenticate(&authenticate_field, ++request_id_);
+    const int rt = trader_api_->ReqAuthenticate(&authenticate_field, ++request_id_);
     if (rt == 0)
     {
         spdlog::info("Authentication request sent successfully...");
@@ -86,6 +88,7 @@ void TraderSpi::OnFrontConnected()
     else
     {
         spdlog::error("Authentication request failed, error code: {}", rt);
+        initialization_tracker_.mark_failed(rt, std::format("Failed to send trader authentication request ({})", rt));
     }
 }
 
@@ -102,7 +105,7 @@ void TraderSpi::OnRspAuthenticate(CThostFtdcRspAuthenticateField * /*pRspAuthent
         safe_strcpy(login_req.UserID, server_.user_id());
         safe_strcpy(login_req.Password, server_.password());
 
-        int rt = trader_api_->ReqUserLogin(&login_req, ++request_id_);
+        const int rt = trader_api_->ReqUserLogin(&login_req, ++request_id_);
         if (rt == 0)
         {
             spdlog::info("Trading login request sent successfully...");
@@ -110,11 +113,14 @@ void TraderSpi::OnRspAuthenticate(CThostFtdcRspAuthenticateField * /*pRspAuthent
         else
         {
             spdlog::error("Trading login request failed, error code: {}", rt);
+            initialization_tracker_.mark_failed(rt, std::format("Failed to send trader login request ({})", rt));
         }
     }
     else
     {
         spdlog::error("Authentication error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
+        initialization_tracker_.mark_failed(error.error_id(),
+                                            std::format("Trader authentication failed: {}", error.error_msg()));
     }
 }
 
@@ -127,6 +133,7 @@ void TraderSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThos
         if (!pRspUserLogin)
         {
             spdlog::error("Trading login response succeeded but payload is null");
+            initialization_tracker_.mark_failed(-1, "Trader login response payload is null");
             return;
         }
 
@@ -143,7 +150,7 @@ void TraderSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThos
         safe_strcpy(settlement_confirm_req.BrokerID, server_.broker_id());
         safe_strcpy(settlement_confirm_req.InvestorID, server_.user_id());
 
-        int rt = trader_api_->ReqSettlementInfoConfirm(&settlement_confirm_req, ++request_id_);
+        const int rt = trader_api_->ReqSettlementInfoConfirm(&settlement_confirm_req, ++request_id_);
         if (rt == 0)
         {
             spdlog::info("Settlement confirmation request sent successfully...");
@@ -151,11 +158,15 @@ void TraderSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThos
         else
         {
             spdlog::error("Settlement confirmation request failed, error code: {}", rt);
+            initialization_tracker_.mark_failed(rt,
+                                                std::format("Failed to send settlement confirmation request ({})", rt));
         }
     }
     else
     {
         spdlog::error("Login error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
+        initialization_tracker_.mark_failed(error.error_id(),
+                                            std::format("Trader login failed: {}", error.error_msg()));
     }
 }
 
@@ -172,11 +183,13 @@ void TraderSpi::OnRspSettlementInfoConfirm(CThostFtdcSettlementInfoConfirmField 
     if (!error.is_error())
     {
         spdlog::info("Investor settlement confirmation successful...");
-        is_ready_.store(true, std::memory_order_release);
+        initialization_tracker_.mark_ready();
     }
     else
     {
         spdlog::error("Settlement confirmation error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
+        initialization_tracker_.mark_failed(error.error_id(),
+                                            std::format("Settlement confirmation failed: {}", error.error_msg()));
     }
 }
 

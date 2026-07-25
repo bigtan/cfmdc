@@ -10,6 +10,7 @@
 #include <shared_mutex>
 #include <vector>
 
+#include "cfmdc/core/InitializationTracker.h"
 #include "cfmdc/types/FrontServer.h"
 #include "cfmdc/utils/ApiWrapper.h"
 #include "cfmdc/utils/Helpers.h"
@@ -48,11 +49,22 @@ class TraderSpi : public CThostFtdcTraderSpi
     /// @return Request result (0 = success)
     int request_query_instrument(std::string_view instrument_id);
 
-    /// @brief Check if trader is ready
-    /// @return true if authenticated and logged in
-    bool is_ready() const noexcept
+    /// @brief Get the current initialization result
+    InitializationResult initialization_result() const
     {
-        return is_ready_.load(std::memory_order_acquire);
+        return initialization_tracker_.result();
+    }
+
+    /// @brief Check whether initialization completed successfully
+    bool is_ready() const
+    {
+        return initialization_tracker_.result().ready();
+    }
+
+    /// @brief Wait for initialization to become ready or fail
+    InitializationResult wait_for_initialization(std::chrono::milliseconds timeout)
+    {
+        return initialization_tracker_.wait_for(timeout);
     }
 
     /// @brief Get instrument IDs (thread-safe)
@@ -92,8 +104,8 @@ class TraderSpi : public CThostFtdcTraderSpi
     FrontServer server_;
 
     // Thread-safe state
-    std::atomic<bool> is_ready_{false};
     std::atomic<int> request_id_{0};
+    InitializationTracker initialization_tracker_;
 
     // Protected by mutex
     mutable std::shared_mutex instrument_mutex_;

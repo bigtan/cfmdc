@@ -10,6 +10,7 @@
 #include <string>
 
 #include "cfmdc/config/Config.h"
+#include "cfmdc/core/InitializationTracker.h"
 #include "cfmdc/core/SubscriptionTracker.h"
 #include "cfmdc/types/FrontServer.h"
 #include "cfmdc/utils/ApiWrapper.h"
@@ -55,11 +56,22 @@ class MdSpi : public CThostFtdcMdSpi
     /// @brief Get the aggregate subscription result
     SubscriptionTracker::Result subscription_result() const;
 
-    /// @brief Check if market data connection is ready
-    /// @return true if logged in
-    bool is_ready() const noexcept
+    /// @brief Get the current initialization result
+    InitializationResult initialization_result() const
     {
-        return is_ready_.load(std::memory_order_acquire);
+        return initialization_tracker_.result();
+    }
+
+    /// @brief Check whether initialization completed successfully
+    bool is_ready() const
+    {
+        return initialization_tracker_.result().ready();
+    }
+
+    /// @brief Wait for initialization to become ready or fail
+    InitializationResult wait_for_initialization(std::chrono::milliseconds timeout)
+    {
+        return initialization_tracker_.wait_for(timeout);
     }
 
     /// @brief Set the trading day (from Trader API) and pre-calculated action days
@@ -101,7 +113,7 @@ class MdSpi : public CThostFtdcMdSpi
     std::string trading_day_;
     std::string action_day_base_;
     std::string action_day_next_;
-    std::atomic<bool> is_ready_{false};
+    InitializationTracker initialization_tracker_;
     SubscriptionTracker subscription_tracker_;
     std::atomic<bool> shutdown_started_{false};
     std::atomic<bool> shutdown_succeeded_{true};

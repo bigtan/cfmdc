@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@ namespace cfmdc
 enum class WaitStatus
 {
     Success,    ///< Operation completed successfully
+    Failed,     ///< Operation completed with an explicit failure
     Timeout,    ///< Operation timed out
     Interrupted ///< Operation interrupted by shutdown signal
 };
@@ -49,7 +51,9 @@ class Application
     void parse_subscription_list(std::vector<std::string> &instruments);
     void query_instruments(const std::vector<std::string> &instruments);
     void subscribe_market_data();
-    WaitStatus wait_for_ready(const std::function<bool()> &ready_check, std::string_view operation);
+    WaitStatus wait_for_initialization(
+        const std::function<InitializationResult(std::chrono::milliseconds)> &wait_for_result,
+        std::string_view operation);
 
     // Multi-server support
     bool init_trader_with_retry();

@@ -55,12 +55,6 @@ class TraderSpi : public CThostFtdcTraderSpi
         return initialization_tracker_.result();
     }
 
-    /// @brief Check whether initialization completed successfully
-    bool is_ready() const
-    {
-        return initialization_tracker_.result().ready();
-    }
-
     /// @brief Wait for initialization to become ready or fail
     InitializationResult wait_for_initialization(std::chrono::milliseconds timeout)
     {

@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <format>
@@ -339,36 +340,46 @@ void Application::subscribe_market_data()
     spdlog::info("Confirmed market data subscriptions: {} instruments", result.succeeded);
 }
 
-WaitStatus Application::wait_for_ready(const std::function<bool()> &ready_check, std::string_view operation)
+WaitStatus Application::wait_for_initialization(
+    const std::function<InitializationResult(std::chrono::milliseconds)> &wait_for_result, std::string_view operation)
 {
     const auto timeout = std::chrono::seconds(config_->init_timeout());
     const auto start_time = std::chrono::steady_clock::now();
+    const auto deadline = start_time + timeout;
 
     spdlog::info("Waiting for {} to complete (timeout: {}s)...", operation, timeout.count());
 
-    while (!ready_check() && !g_shutdown_requested.load(std::memory_order_acquire))
+    while (!g_shutdown_requested.load(std::memory_order_acquire))
     {
-        std::this_thread::sleep_for(SLEEP_DURATION);
-
-        // Check if timeout has been reached
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
-        if (elapsed >= timeout)
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
         {
+            const auto elapsed = now - start_time;
             spdlog::error("{} timed out after {}s, service may be unavailable", operation,
                           std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
             return WaitStatus::Timeout;
         }
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        const auto wait_slice =
+            (std::min)(remaining, std::chrono::duration_cast<std::chrono::milliseconds>(SLEEP_DURATION));
+        const auto result = wait_for_result(wait_slice);
+        if (result.ready())
+        {
+            const auto elapsed = std::chrono::steady_clock::now() - start_time;
+            spdlog::info("{} completed successfully (took {:.2f}s)", operation,
+                         std::chrono::duration<double>(elapsed).count());
+            return WaitStatus::Success;
+        }
+        if (result.failed())
+        {
+            spdlog::error("{} failed (error {}): {}", operation, result.error_code, result.message);
+            return WaitStatus::Failed;
+        }
     }
 
-    if (g_shutdown_requested.load(std::memory_order_acquire))
-    {
-        spdlog::info("Shutdown requested during {}", operation);
-        return WaitStatus::Interrupted;
-    }
-
-    auto elapsed = std::chrono::steady_clock::now() - start_time;
-    spdlog::info("{} completed successfully (took {:.2f}s)", operation, std::chrono::duration<double>(elapsed).count());
-    return WaitStatus::Success;
+    spdlog::info("Shutdown requested during {}", operation);
+    return WaitStatus::Interrupted;
 }
 
 bool Application::init_trader_with_retry()
@@ -393,8 +404,9 @@ bool Application::init_trader_with_retry()
             trader_spi_->init();
 
             // Wait for initialization
-            auto status = wait_for_ready([this]() { return trader_spi_->is_ready(); },
-                                         std::format("trader initialization (server {})", i + 1));
+            auto status = wait_for_initialization(
+                [this](std::chrono::milliseconds timeout) { return trader_spi_->wait_for_initialization(timeout); },
+                std::format("trader initialization (server {})", i + 1));
 
             if (status == WaitStatus::Success)
             {
@@ -446,8 +458,9 @@ bool Application::init_md_with_retry()
             md_spi_->init();
 
             // Wait for initialization
-            auto status = wait_for_ready([this]() { return md_spi_->is_ready(); },
-                                         std::format("market data initialization (server {})", i + 1));
+            auto status = wait_for_initialization(
+                [this](std::chrono::milliseconds timeout) { return md_spi_->wait_for_initialization(timeout); },
+                std::format("market data initialization (server {})", i + 1));
 
             if (status == WaitStatus::Success)
             {

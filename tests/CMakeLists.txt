@@ -11,6 +11,7 @@ set(TEST_SOURCES
     test_config.cpp
     test_error.cpp
     test_file_manager.cpp
+    test_initialization_tracker.cpp
     test_lock_free_queue.cpp
     test_market_data_time_policy.cpp
     test_subscription_tracker.cpp

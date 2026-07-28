@@ -2,7 +2,7 @@
   "name": "cfmdc",
   "version-string": "0.1.2",
   "dependencies": [
-    "cxxopts",
+    "args",
     "spdlog",
     "tomlplusplus",
     "catch2"

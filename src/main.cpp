@@ -2,8 +2,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <args.hxx>
 #include <chrono>
-#include <cxxopts.hpp>
 #include <exception>
 #include <memory>
 #include <print>
@@ -43,36 +43,44 @@ int main(int argc, char *argv[])
 {
     try
     {
-        // Setup command line options using cxxopts
-        cxxopts::Options options("cfmdc", std::string("CTP Market Data Recorder v") +
-                                              std::string(cfmdc::APP_VERSION));
+        args::ArgumentParser parser(std::string("CTP Market Data Recorder v") + std::string(cfmdc::APP_VERSION));
+        args::HelpFlag help(parser, "help", "Print usage information", {'h', "help"});
+        args::Flag version(parser, "version", "Print version information", {'v', "version"});
+        args::ValueFlag<std::string> config_option(parser, "config_file", "Path to configuration file",
+                                                   {'c', "config"});
+        args::Positional<std::string> config_positional(parser, "config_file", "Path to configuration file");
 
-        options.add_options()("c,config", "Path to configuration file",
-                              cxxopts::value<std::string>()->default_value(std::string(cfmdc::CONFIG_FILE)))(
-            "h,help", "Print usage information")("v,version", "Print version information");
-
-        // Allow positional argument for config file
-        options.parse_positional({"config"});
-        options.positional_help("[config_file]");
-
-        auto result = options.parse(argc, argv);
-
-        // Handle help
-        if (result.count("help"))
+        try
         {
-            std::println("{}", options.help());
+            parser.ParseCLI(argc, argv);
+        }
+        catch (const args::Help &)
+        {
+            std::print("{}", parser.Help());
             return 0;
         }
+        catch (const args::ParseError &e)
+        {
+            std::println(stderr, "Error: {}", e.what());
+            std::print(stderr, "{}", parser.Help());
+            return 1;
+        }
 
-        // Handle version
-        if (result.count("version"))
+        if (version)
         {
             std::println("CFMDC - CTP Market Data Recorder v{}", cfmdc::APP_VERSION);
             return 0;
         }
 
-        // Get config file
-        std::string config_file = result["config"].as<std::string>();
+        std::string config_file(cfmdc::CONFIG_FILE);
+        if (config_positional)
+        {
+            config_file = args::get(config_positional);
+        }
+        if (config_option)
+        {
+            config_file = args::get(config_option);
+        }
 
         setup_logging();
 

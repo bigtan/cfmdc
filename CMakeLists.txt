@@ -131,7 +131,7 @@ endfunction()
 # ==============================================================================
 find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
-find_package(cxxopts CONFIG REQUIRED)
+find_package(args CONFIG REQUIRED)
 
 # 可选：Parquet 支持
 if(CFMDC_ENABLE_PARQUET)
@@ -176,7 +176,7 @@ cfmdc_apply_version_metadata(cfmdc)
 target_link_libraries(cfmdc PRIVATE
     spdlog::spdlog
     tomlplusplus::tomlplusplus
-    cxxopts::cxxopts
+    taywee::args
     CTP::ctp
 )
 

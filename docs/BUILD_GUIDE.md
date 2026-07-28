@@ -10,7 +10,7 @@
 ## 2. vcpkg 准备
 
 项目使用 vcpkg manifest 模式（`vcpkg.json`），依赖包含：
-`spdlog`, `tomlplusplus`, `cxxopts`, `arrow`, `parquet`, `catch2`。
+`spdlog`, `tomlplusplus`, `Taywee/args`, `arrow`, `parquet`, `catch2`。
 
 ### Windows
 

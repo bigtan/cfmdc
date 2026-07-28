@@ -21,7 +21,7 @@ Current project version: `0.1.2`.
 
 - CMake 3.31+
 - C++23 compiler (MSVC 2022+, GCC 13+, Clang 16+)
-- vcpkg (for spdlog, tomlplusplus, cxxopts, Arrow/Parquet, Catch2)
+- vcpkg (for spdlog, tomlplusplus, Taywee/args, Arrow/Parquet, Catch2)
 - CTP SDK (already vendored under `3rd/ctp`)
 
 ### Build (Windows)

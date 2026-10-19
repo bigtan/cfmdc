@@ -107,7 +107,6 @@ class AsyncFileManager
 
     bool process_market_data(CThostFtdcDepthMarketDataField &data) const;
     bool write_processed_market_data(const CThostFtdcDepthMarketDataField &data);
-    bool commit_processed_market_data(const CThostFtdcDepthMarketDataField &data);
     void mark_write_failure(std::string_view operation, std::string_view instrument_id = {});
 
     // Configuration
@@ -130,9 +129,10 @@ class AsyncFileManager
     // so 16384 slots cover several seconds of full-market backlog.
     static constexpr size_t LOCKFREE_QUEUE_SIZE = 16384; // Must be power of 2
     using MarketDataQueue = LockFreeQueue<CThostFtdcDepthMarketDataField, LOCKFREE_QUEUE_SIZE>;
-    MarketDataQueue queue_;
+    std::unique_ptr<MarketDataQueue> queue_;
 #ifdef CFMDC_ENABLE_PARQUET
     std::unique_ptr<MarketDataQueue> parquet_queue_;
+    std::atomic<bool> parquet_worker_active_{false};
 #endif
 
     // Worker thread

@@ -18,6 +18,10 @@
 #include <sched.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+
 #include "ThostFtdcUserApiDataType.h"
 #include "ThostFtdcUserApiStruct.h"
 #include "cfmdc/utils/Constants.h"
@@ -25,6 +29,22 @@
 
 namespace cfmdc
 {
+
+/// @brief Emit a CPU pause/yield hint for spin-wait loops
+inline void cpu_relax() noexcept
+{
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    _mm_pause();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef _MSC_VER
+    __yield();
+#else
+    asm volatile("yield" ::: "memory");
+#endif
+#else
+    std::atomic_signal_fence(std::memory_order_acquire);
+#endif
+}
 
 /// @brief Set thread affinity to a specific CPU core
 /// @tparam ThreadType Thread type (std::thread or std::jthread)

@@ -23,7 +23,8 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     : csv_path_(csv_path), parquet_path_(parquet_path), trading_day_(trading_day), action_day_base_(base_action_day),
       action_day_next_(next_action_day), storage_mode_(mode),
       csv_flush_interval_(options.csv_flush_interval > std::chrono::milliseconds::zero() ? options.csv_flush_interval
-                                                                                         : std::chrono::seconds(5))
+                                                                                         : std::chrono::seconds(5)),
+      queue_(std::make_unique<MarketDataQueue>())
 {
 #ifndef CFMDC_ENABLE_PARQUET
     if (mode == StorageMode::PARQUET || mode == StorageMode::HYBRID)
@@ -76,6 +77,7 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
 #ifdef CFMDC_ENABLE_PARQUET
     if (parquet_writer_)
     {
+        parquet_worker_active_.store(true, std::memory_order_release);
         parquet_worker_thread_ = std::jthread([this](std::stop_token st) { parquet_worker_loop(st); });
     }
 #endif
@@ -127,7 +129,7 @@ AsyncFileManager::~AsyncFileManager()
 bool AsyncFileManager::write_market_data_async(const CThostFtdcDepthMarketDataField &data)
 {
     // Enqueue only: no filtering or field rewriting here.
-    return queue_.try_enqueue(data);
+    return queue_->try_enqueue(data);
 }
 
 bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data) const
@@ -176,7 +178,7 @@ bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDa
     {
         while (!parquet_queue_->try_enqueue(data))
         {
-            if (fatal_error_.load(std::memory_order_acquire))
+            if (fatal_error_.load(std::memory_order_acquire) || !parquet_worker_active_.load(std::memory_order_acquire))
             {
                 return false;
             }
@@ -184,15 +186,6 @@ bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDa
         }
     }
 #endif
-    return true;
-}
-
-bool AsyncFileManager::commit_processed_market_data(const CThostFtdcDepthMarketDataField &data)
-{
-    if (!write_processed_market_data(data))
-    {
-        return false;
-    }
     return true;
 }
 
@@ -270,11 +263,11 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
     Statistics stats;
     stats.csv_records = csv_records_.load(std::memory_order_relaxed);
     stats.parquet_records = parquet_records_.load(std::memory_order_relaxed);
-    stats.queue_size = queue_.size();
+    stats.queue_size = queue_->size();
 #ifdef CFMDC_ENABLE_PARQUET
     stats.parquet_queue_size = parquet_queue_ ? parquet_queue_->size() : 0;
 #endif
-    stats.dropped_records = queue_.overflow_count();
+    stats.dropped_records = queue_->overflow_count();
     stats.write_failures = write_failures_.load(std::memory_order_relaxed);
     stats.periodic_flushes = periodic_flushes_.load(std::memory_order_relaxed);
     switch (storage_mode_)
@@ -345,33 +338,35 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         return true;
     };
 
-    auto process_data = [&](CThostFtdcDepthMarketDataField &data) {
-        if (!process_market_data(data))
+    auto process_slot = [&](CThostFtdcDepthMarketDataField &slot) {
+        if (!process_market_data(slot))
         {
             return true;
         }
-        return commit_processed_market_data(data);
+        return write_processed_market_data(slot);
     };
-
-    std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
 
     while (!st.stop_requested())
     {
         size_t count = 0;
-        while (count < kBatchSize && queue_.try_dequeue(batch[count]))
+        while (count < kBatchSize)
         {
-            count++;
+            auto *slot = queue_->front();
+            if (!slot)
+            {
+                break;
+            }
+            const bool ok = process_slot(*slot);
+            queue_->pop();
+            if (!ok)
+            {
+                return;
+            }
+            ++count;
         }
 
         if (count > 0)
         {
-            for (size_t i = 0; i < count; ++i)
-            {
-                if (!process_data(batch[i]))
-                {
-                    return;
-                }
-            }
             if (!flush_csv_if_due(clock::now()))
             {
                 return;
@@ -389,7 +384,7 @@ void AsyncFileManager::worker_loop(std::stop_token st)
 
         if (now < spin_deadline)
         {
-            std::atomic_signal_fence(std::memory_order_acquire);
+            cpu_relax();
             continue;
         }
 
@@ -403,11 +398,12 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         sleep_duration = (std::min)(sleep_duration * 2, kSleepMax);
     }
 
-    // Process remaining items
-    CThostFtdcDepthMarketDataField data;
-    while (queue_.try_dequeue(data))
+    // Process remaining items in-place
+    while (auto *slot = queue_->front())
     {
-        if (!process_data(data))
+        const bool ok = process_slot(*slot);
+        queue_->pop();
+        if (!ok)
         {
             return;
         }
@@ -419,36 +415,48 @@ void AsyncFileManager::parquet_worker_loop(std::stop_token st)
 {
     using namespace std::chrono_literals;
     constexpr size_t kBatchSize = 64;
-    std::array<CThostFtdcDepthMarketDataField, kBatchSize> batch;
 
-    auto write_batch = [&](size_t count) {
-        for (size_t i = 0; i < count; ++i)
+    struct ActiveGuard
+    {
+        std::atomic<bool> &flag;
+        ~ActiveGuard()
         {
-            if (!parquet_writer_->write(batch[i]))
-            {
-                mark_write_failure("Parquet write", batch[i].InstrumentID);
-                return false;
-            }
-            parquet_records_.fetch_add(1, std::memory_order_relaxed);
+            flag.store(false, std::memory_order_release);
         }
+    } active_guard{parquet_worker_active_};
+
+    auto write_slot = [&](const CThostFtdcDepthMarketDataField &slot) {
+        if (!parquet_writer_->write(slot))
+        {
+            mark_write_failure("Parquet write", slot.InstrumentID);
+            return false;
+        }
+        parquet_records_.fetch_add(1, std::memory_order_relaxed);
         return true;
     };
 
     while (!st.stop_requested() && !fatal_error_.load(std::memory_order_acquire))
     {
         size_t count = 0;
-        while (count < kBatchSize && parquet_queue_->try_dequeue(batch[count]))
+        while (count < kBatchSize)
         {
+            const auto *slot = parquet_queue_->front();
+            if (!slot)
+            {
+                break;
+            }
+            const bool ok = write_slot(*slot);
+            parquet_queue_->pop();
+            if (!ok)
+            {
+                return;
+            }
             ++count;
         }
         if (count == 0)
         {
             std::this_thread::sleep_for(200us);
             continue;
-        }
-        if (!write_batch(count))
-        {
-            return;
         }
     }
 
@@ -457,21 +465,14 @@ void AsyncFileManager::parquet_worker_loop(std::stop_token st)
         return;
     }
 
-    size_t count = 0;
-    while (parquet_queue_->try_dequeue(batch[count]))
+    while (const auto *slot = parquet_queue_->front())
     {
-        if (++count == kBatchSize)
+        const bool ok = write_slot(*slot);
+        parquet_queue_->pop();
+        if (!ok)
         {
-            if (!write_batch(count))
-            {
-                return;
-            }
-            count = 0;
+            return;
         }
-    }
-    if (count > 0)
-    {
-        (void)write_batch(count);
     }
 }
 #endif

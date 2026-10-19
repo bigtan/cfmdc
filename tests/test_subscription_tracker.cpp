@@ -126,6 +126,7 @@ TEST_CASE("SubscriptionTracker requires complete successful responses", "[subscr
     {
         SubscriptionTracker tracker;
         tracker.begin(instruments);
+        tracker.mark_request_sent(instruments);
         tracker.record("rb2505", true, false);
 
         // Simulate reconnect re-sending both instruments
@@ -136,5 +137,54 @@ TEST_CASE("SubscriptionTracker requires complete successful responses", "[subscr
         const auto result = tracker.result();
         REQUIRE(result.successful());
         REQUIRE(result.succeeded == 2);
+    }
+
+    SECTION("re-subscription retries when first attempt fails and succeeds on subsequent attempt")
+    {
+        SubscriptionTracker tracker;
+        tracker.begin(instruments);
+        tracker.mark_request_sent(instruments);
+        tracker.record("rb2505", true, false);
+        tracker.record("ag2506", true, true);
+        REQUIRE(tracker.result().successful());
+
+        size_t call_count = 0;
+        const bool ok = tracker.resubscribe_with_retry(
+            [&](std::span<char *> req_instruments, size_t attempt) {
+                ++call_count;
+                REQUIRE(req_instruments.size() == 2);
+                REQUIRE(std::string_view(req_instruments[0]) == "rb2505");
+                REQUIRE(std::string_view(req_instruments[1]) == "ag2506");
+                return attempt == 1 ? -1 : 0;
+            },
+            3, 1ms, []() { return false; });
+
+        REQUIRE(ok);
+        REQUIRE(call_count == 2);
+        REQUIRE_FALSE(tracker.has_resubscription_failure());
+
+        tracker.record("rb2505", true, false);
+        tracker.record("ag2506", true, true);
+        REQUIRE(tracker.wait_for_completion(10ms));
+        REQUIRE(tracker.result().successful());
+    }
+
+    SECTION("re-subscription marks fatal failure after exhausting bounded retries")
+    {
+        SubscriptionTracker tracker;
+        tracker.begin(instruments);
+        tracker.mark_request_sent(instruments);
+
+        size_t call_count = 0;
+        const bool ok = tracker.resubscribe_with_retry(
+            [&](std::span<char *>, size_t) {
+                ++call_count;
+                return -2;
+            },
+            3, 1ms, []() { return false; });
+
+        REQUIRE_FALSE(ok);
+        REQUIRE(call_count == 3);
+        REQUIRE(tracker.has_resubscription_failure());
     }
 }

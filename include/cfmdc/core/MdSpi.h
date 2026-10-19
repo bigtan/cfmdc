@@ -113,8 +113,6 @@ class MdSpi : public CThostFtdcMdSpi
     std::string action_day_next_;
     InitializationTracker initialization_tracker_;
     SubscriptionTracker subscription_tracker_;
-    mutable std::mutex subscription_mutex_;
-    std::vector<std::string> subscribed_instruments_;
     std::atomic<bool> shutdown_started_{false};
     std::atomic<bool> shutdown_succeeded_{true};
 };

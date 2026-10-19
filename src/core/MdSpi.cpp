@@ -44,48 +44,42 @@ int MdSpi::subscribe_market_data(std::span<char *> instrument_ids)
     const int rt = md_api_->SubscribeMarketData(instrument_ids.data(), static_cast<int>(instrument_ids.size()));
     if (rt == 0)
     {
-        std::lock_guard lock(subscription_mutex_);
-        subscribed_instruments_.clear();
-        subscribed_instruments_.reserve(instrument_ids.size());
-        for (const char *id : instrument_ids)
-        {
-            if (id && *id != '\0')
-            {
-                subscribed_instruments_.emplace_back(id);
-            }
-        }
+        subscription_tracker_.mark_request_sent(instrument_ids);
     }
     return rt;
 }
 
 void MdSpi::resubscribe_market_data()
 {
-    std::vector<std::string> instruments_copy;
-    {
-        std::lock_guard lock(subscription_mutex_);
-        if (subscribed_instruments_.empty())
-        {
-            return;
-        }
-        instruments_copy = subscribed_instruments_;
-    }
+    static constexpr size_t kMaxAttempts = SubscriptionTracker::kDefaultResubscribeAttempts;
+    const bool succeeded = subscription_tracker_.resubscribe_with_retry(
+        [this](std::span<char *> instruments, size_t attempt) {
+            const int rt = md_api_->SubscribeMarketData(instruments.data(), static_cast<int>(instruments.size()));
+            if (rt == 0)
+            {
+                spdlog::info("Re-subscribed {} instruments after front reconnection (attempt {}/{})",
+                             instruments.size(), attempt, kMaxAttempts);
+            }
+            else if (attempt < kMaxAttempts)
+            {
+                spdlog::warn(
+                    "Failed to re-subscribe {} instruments on attempt {}/{} (error code: {}), retrying...",
+                    instruments.size(), attempt, kMaxAttempts, rt);
+            }
+            else
+            {
+                spdlog::critical(
+                    "Exhausted all {} attempts to re-subscribe {} instruments after reconnection (error code: {})",
+                    kMaxAttempts, instruments.size(), rt);
+            }
+            return rt;
+        },
+        kMaxAttempts, SubscriptionTracker::kDefaultResubscribeDelay,
+        [this]() { return shutdown_started_.load(std::memory_order_acquire); });
 
-    std::vector<char *> c_strings;
-    c_strings.reserve(instruments_copy.size());
-    for (auto &id : instruments_copy)
+    if (!succeeded && !shutdown_started_.load(std::memory_order_acquire))
     {
-        c_strings.push_back(id.data());
-    }
-
-    const int rt = md_api_->SubscribeMarketData(c_strings.data(), static_cast<int>(c_strings.size()));
-    if (rt == 0)
-    {
-        spdlog::info("Re-subscribed {} instruments after front reconnection", c_strings.size());
-    }
-    else
-    {
-        spdlog::error("Failed to re-subscribe {} instruments after front reconnection, error code: {}",
-                      c_strings.size(), rt);
+        spdlog::critical("Marking market data pipeline as failed due to unrecoverable re-subscription failure");
     }
 }
 
@@ -152,6 +146,10 @@ void MdSpi::log_statistics() const
 
 bool MdSpi::has_fatal_pipeline_error() const noexcept
 {
+    if (subscription_tracker_.has_resubscription_failure())
+    {
+        return true;
+    }
     auto *file_manager = file_manager_.load(std::memory_order_acquire);
     return file_manager && file_manager->has_fatal_error();
 }
@@ -167,13 +165,13 @@ bool MdSpi::shutdown()
     md_api_.reset();
     file_manager_.store(nullptr, std::memory_order_release);
 
-    bool success = true;
+    bool success = !subscription_tracker_.has_resubscription_failure();
     if (async_file_manager_)
     {
         async_file_manager_->stop();
         const bool flushed = async_file_manager_->flush_all();
         const bool closed = async_file_manager_->close_all();
-        success = flushed && closed && !async_file_manager_->has_fatal_error();
+        success = success && flushed && closed && !async_file_manager_->has_fatal_error();
     }
     shutdown_succeeded_.store(success, std::memory_order_release);
     return success;

@@ -49,12 +49,21 @@ class CsvWriter : public IMarketDataWriter
     bool close_all();
 
     /// @brief Get number of open CSV files
-    size_t file_count() const
+    size_t file_count() const noexcept
     {
         return file_handles_.size();
     }
 
+    /// @brief Get number of open CSV files with unflushed writes
+    size_t dirty_file_count() const noexcept;
+
   private:
+    struct FileEntry
+    {
+        std::unique_ptr<std::ofstream> stream;
+        bool dirty{false};
+    };
+
     /// @brief Transparent hash so lookups accept string_view without allocating
     struct StringHash
     {
@@ -65,10 +74,10 @@ class CsvWriter : public IMarketDataWriter
         }
     };
 
-    /// @brief Get or create file handle for an instrument
+    /// @brief Get or create file entry for an instrument
     /// @param instrument_id Instrument identifier
-    /// @return Pointer to ofstream, or nullptr if failed
-    std::ofstream *get_or_create_file(std::string_view instrument_id);
+    /// @return Pointer to FileEntry, or nullptr if failed
+    FileEntry *get_or_create_file(std::string_view instrument_id);
 
     /// @brief Write CSV header to file
     /// @param file Output stream to write header to
@@ -79,7 +88,7 @@ class CsvWriter : public IMarketDataWriter
     std::string trading_day_;
 
     // File handles
-    std::unordered_map<std::string, std::unique_ptr<std::ofstream>, StringHash, std::equal_to<>> file_handles_;
+    std::unordered_map<std::string, FileEntry, StringHash, std::equal_to<>> file_handles_;
 
     // Pre-allocated string buffer for formatting
     std::string csv_buffer_;

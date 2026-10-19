@@ -125,3 +125,34 @@ TEST_CASE("AsyncFileManager drains CSV and Parquet workers independently", "[fil
     std::filesystem::remove_all(output_root);
 }
 #endif
+
+TEST_CASE("CsvWriter tracks and clears dirty state per instrument", "[csv_writer][flush]")
+{
+    const auto output_directory = std::filesystem::current_path() / "test_csv_dirty_tracking_output";
+    std::filesystem::remove_all(output_directory);
+
+    {
+        CsvWriter writer(output_directory, "20250102");
+        auto rb_tick = make_tick();
+        auto ag_tick = make_tick();
+        safe_strcpy(ag_tick.InstrumentID, "ag2506");
+
+        REQUIRE(writer.write(rb_tick));
+        REQUIRE(writer.write(ag_tick));
+        REQUIRE(writer.file_count() == 2);
+        REQUIRE(writer.dirty_file_count() == 2);
+
+        REQUIRE(writer.flush());
+        REQUIRE(writer.dirty_file_count() == 0);
+
+        // Writing to only one instrument marks only that stream dirty
+        REQUIRE(writer.write(rb_tick));
+        REQUIRE(writer.dirty_file_count() == 1);
+
+        REQUIRE(writer.flush());
+        REQUIRE(writer.dirty_file_count() == 0);
+        REQUIRE(writer.close_all());
+    }
+
+    std::filesystem::remove_all(output_directory);
+}

@@ -27,9 +27,9 @@ CsvWriter::~CsvWriter()
 
 bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
 {
-    std::ofstream *file = get_or_create_file(data.InstrumentID);
+    FileEntry *entry = get_or_create_file(data.InstrumentID);
 
-    if (!file || !file->is_open())
+    if (!entry || !entry->stream || !entry->stream->is_open())
     {
         return false;
     }
@@ -52,20 +52,22 @@ bool CsvWriter::write(const CThostFtdcDepthMarketDataField &data)
         clean_price(data.AskPrice4), data.AskVolume4, clean_price(data.BidPrice5), data.BidVolume5,
         clean_price(data.AskPrice5), data.AskVolume5, clean_price(data.AveragePrice), data.ActionDay);
 
-    *file << csv_buffer_ << '\n';
+    *entry->stream << csv_buffer_ << '\n';
+    entry->dirty = true;
     // Surface stream errors (disk full, closed handle) instead of silently dropping data
-    return file->good();
+    return entry->stream->good();
 }
 
 bool CsvWriter::close_all()
 {
     bool success = true;
-    for (auto &[instrument_id, file] : file_handles_)
+    for (auto &[instrument_id, entry] : file_handles_)
     {
-        if (file && file->is_open())
+        if (entry.stream && entry.stream->is_open())
         {
-            file->close();
-            success = file->good() && success;
+            entry.stream->close();
+            entry.dirty = false;
+            success = entry.stream->good() && success;
         }
     }
     file_handles_.clear();
@@ -75,24 +77,38 @@ bool CsvWriter::close_all()
 bool CsvWriter::flush()
 {
     bool success = true;
-    for (auto &[instrument_id, file] : file_handles_)
+    for (auto &[instrument_id, entry] : file_handles_)
     {
-        if (file && file->is_open())
+        if (entry.stream && entry.stream->is_open() && entry.dirty)
         {
-            file->flush();
-            success = file->good() && success;
+            entry.stream->flush();
+            entry.dirty = false;
+            success = entry.stream->good() && success;
         }
     }
     return success;
 }
 
-std::ofstream *CsvWriter::get_or_create_file(std::string_view instrument_id)
+size_t CsvWriter::dirty_file_count() const noexcept
+{
+    size_t count = 0;
+    for (const auto &[instrument_id, entry] : file_handles_)
+    {
+        if (entry.dirty)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+CsvWriter::FileEntry *CsvWriter::get_or_create_file(std::string_view instrument_id)
 {
     // Check if we already have a handle for this instrument
     auto it = file_handles_.find(instrument_id);
-    if (it != file_handles_.end() && it->second && it->second->is_open())
+    if (it != file_handles_.end() && it->second.stream && it->second.stream->is_open())
     {
-        return it->second.get();
+        return &it->second;
     }
 
     // Create directory structure: base_path/trading_day/
@@ -130,12 +146,12 @@ std::ofstream *CsvWriter::get_or_create_file(std::string_view instrument_id)
     }
 
     // Store the file handle
-    std::ofstream *file_ptr = file.get();
-    file_handles_.emplace(std::string(instrument_id), std::move(file));
+    auto [emplaced_it, inserted] =
+        file_handles_.insert_or_assign(std::string(instrument_id), FileEntry{std::move(file), need_header});
 
     spdlog::debug("Created CSV file for instrument {}: {}", instrument_id, file_path.string());
 
-    return file_ptr;
+    return &emplaced_it->second;
 }
 
 void CsvWriter::write_csv_header(std::ofstream &file)

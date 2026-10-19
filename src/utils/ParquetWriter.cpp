@@ -23,14 +23,15 @@ namespace cfmdc
 namespace
 {
 
-struct MarketDataStringLengths
+/// @brief Fast length check for CTP char[9] fields that are normally 8-byte dates/times
+inline int32_t fast_date_time_len(const char (&str)[9]) noexcept
 {
-    int32_t trading_day{0};
-    int32_t instrument_id{0};
-    int32_t exchange_id{0};
-    int32_t update_time{0};
-    int32_t action_day{0};
-};
+    if (str[0] != '\0' && str[7] != '\0' && str[8] == '\0')
+    {
+        return 8;
+    }
+    return static_cast<int32_t>(std::char_traits<char>::length(str));
+}
 
 } // namespace
 
@@ -76,7 +77,6 @@ class ParquetMarketDataWriter::Impl
 
     // Row-group buffer. write() only copies rows here; Arrow builders are touched in flush_buffer().
     std::vector<CThostFtdcDepthMarketDataField> row_buffer;
-    std::vector<MarketDataStringLengths> string_lengths;
 };
 
 ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &file_path, const Config &config)
@@ -85,7 +85,6 @@ ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &fi
     try
     {
         impl_->row_buffer.reserve(std::max<size_t>(1, config_.row_group_size));
-        impl_->string_lengths.reserve(std::max<size_t>(1, config_.row_group_size));
 
         // Create schema
         initialize_schema();
@@ -293,30 +292,6 @@ void ParquetMarketDataWriter::flush_buffer()
     try
     {
         const auto row_count = static_cast<int64_t>(rows.size());
-        int64_t trading_day_bytes = 0;
-        int64_t instrument_id_bytes = 0;
-        int64_t exchange_id_bytes = 0;
-        int64_t update_time_bytes = 0;
-        int64_t action_day_bytes = 0;
-
-        impl_->string_lengths.resize(rows.size());
-        for (size_t i = 0; i < rows.size(); ++i)
-        {
-            const auto &row = rows[i];
-            auto &lengths = impl_->string_lengths[i];
-
-            lengths.trading_day = static_cast<int32_t>(std::strlen(row.TradingDay));
-            lengths.instrument_id = static_cast<int32_t>(std::strlen(row.InstrumentID));
-            lengths.exchange_id = static_cast<int32_t>(std::strlen(row.ExchangeID));
-            lengths.update_time = static_cast<int32_t>(std::strlen(row.UpdateTime));
-            lengths.action_day = static_cast<int32_t>(std::strlen(row.ActionDay));
-
-            trading_day_bytes += lengths.trading_day;
-            instrument_id_bytes += lengths.instrument_id;
-            exchange_id_bytes += lengths.exchange_id;
-            update_time_bytes += lengths.update_time;
-            action_day_bytes += lengths.action_day;
-        }
 
 #define CHECK_STATUS(expr)                                                                                             \
     do                                                                                                                 \
@@ -336,9 +311,9 @@ void ParquetMarketDataWriter::flush_buffer()
         CHECK_STATUS((builder).ReserveData(bytes));                                                                    \
     } while (0)
 
-        RESERVE_STRING_BUILDER(impl_->trading_day_builder, trading_day_bytes);
-        RESERVE_STRING_BUILDER(impl_->instrument_id_builder, instrument_id_bytes);
-        RESERVE_STRING_BUILDER(impl_->exchange_id_builder, exchange_id_bytes);
+        RESERVE_STRING_BUILDER(impl_->trading_day_builder, row_count * 8);
+        RESERVE_STRING_BUILDER(impl_->instrument_id_builder, row_count * 8);
+        RESERVE_STRING_BUILDER(impl_->exchange_id_builder, row_count * 6);
         RESERVE_BUILDER(impl_->last_price_builder);
         RESERVE_BUILDER(impl_->pre_settlement_price_builder);
         RESERVE_BUILDER(impl_->pre_close_price_builder);
@@ -355,7 +330,7 @@ void ParquetMarketDataWriter::flush_buffer()
         RESERVE_BUILDER(impl_->lower_limit_price_builder);
         RESERVE_BUILDER(impl_->pre_delta_builder);
         RESERVE_BUILDER(impl_->curr_delta_builder);
-        RESERVE_STRING_BUILDER(impl_->update_time_builder, update_time_bytes);
+        RESERVE_STRING_BUILDER(impl_->update_time_builder, row_count * 8);
         RESERVE_BUILDER(impl_->update_millisec_builder);
 
         for (int i = 0; i < 5; ++i)
@@ -367,19 +342,18 @@ void ParquetMarketDataWriter::flush_buffer()
         }
 
         RESERVE_BUILDER(impl_->average_price_builder);
-        RESERVE_STRING_BUILDER(impl_->action_day_builder, action_day_bytes);
+        RESERVE_STRING_BUILDER(impl_->action_day_builder, row_count * 8);
 
 #undef RESERVE_STRING_BUILDER
 #undef RESERVE_BUILDER
 
-        for (size_t i = 0; i < rows.size(); ++i)
+        for (const auto &row : rows)
         {
-            const auto &row = rows[i];
-            const auto &lengths = impl_->string_lengths[i];
-
-            CHECK_STATUS(impl_->trading_day_builder.Append(row.TradingDay, lengths.trading_day));
-            CHECK_STATUS(impl_->instrument_id_builder.Append(row.InstrumentID, lengths.instrument_id));
-            CHECK_STATUS(impl_->exchange_id_builder.Append(row.ExchangeID, lengths.exchange_id));
+            CHECK_STATUS(impl_->trading_day_builder.Append(row.TradingDay, fast_date_time_len(row.TradingDay)));
+            CHECK_STATUS(impl_->instrument_id_builder.Append(
+                row.InstrumentID, static_cast<int32_t>(std::char_traits<char>::length(row.InstrumentID))));
+            CHECK_STATUS(impl_->exchange_id_builder.Append(
+                row.ExchangeID, static_cast<int32_t>(std::char_traits<char>::length(row.ExchangeID))));
             impl_->last_price_builder.UnsafeAppend(clean_price(row.LastPrice));
             impl_->pre_settlement_price_builder.UnsafeAppend(clean_price(row.PreSettlementPrice));
             impl_->pre_close_price_builder.UnsafeAppend(clean_price(row.PreClosePrice));
@@ -396,7 +370,7 @@ void ParquetMarketDataWriter::flush_buffer()
             impl_->lower_limit_price_builder.UnsafeAppend(clean_price(row.LowerLimitPrice));
             impl_->pre_delta_builder.UnsafeAppend(clean_price(row.PreDelta));
             impl_->curr_delta_builder.UnsafeAppend(clean_price(row.CurrDelta));
-            CHECK_STATUS(impl_->update_time_builder.Append(row.UpdateTime, lengths.update_time));
+            CHECK_STATUS(impl_->update_time_builder.Append(row.UpdateTime, fast_date_time_len(row.UpdateTime)));
             impl_->update_millisec_builder.UnsafeAppend(row.UpdateMillisec);
 
             impl_->bid_price_builders[0].UnsafeAppend(clean_price(row.BidPrice1));
@@ -421,7 +395,7 @@ void ParquetMarketDataWriter::flush_buffer()
             impl_->ask_volume_builders[4].UnsafeAppend(row.AskVolume5);
 
             impl_->average_price_builder.UnsafeAppend(clean_price(row.AveragePrice));
-            CHECK_STATUS(impl_->action_day_builder.Append(row.ActionDay, lengths.action_day));
+            CHECK_STATUS(impl_->action_day_builder.Append(row.ActionDay, fast_date_time_len(row.ActionDay)));
         }
 
         // Finish all builders and create arrays
@@ -493,7 +467,6 @@ void ParquetMarketDataWriter::flush_buffer()
         spdlog::debug("Wrote row group with {} records", table->num_rows());
 
         rows.clear();
-        impl_->string_lengths.clear();
     }
     catch (const std::exception &ex)
     {

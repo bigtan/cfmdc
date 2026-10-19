@@ -41,7 +41,52 @@ int MdSpi::subscribe_market_data(std::span<char *> instrument_ids)
         return -1;
     }
     subscription_tracker_.begin(instrument_ids);
-    return md_api_->SubscribeMarketData(instrument_ids.data(), static_cast<int>(instrument_ids.size()));
+    const int rt = md_api_->SubscribeMarketData(instrument_ids.data(), static_cast<int>(instrument_ids.size()));
+    if (rt == 0)
+    {
+        std::lock_guard lock(subscription_mutex_);
+        subscribed_instruments_.clear();
+        subscribed_instruments_.reserve(instrument_ids.size());
+        for (const char *id : instrument_ids)
+        {
+            if (id && *id != '\0')
+            {
+                subscribed_instruments_.emplace_back(id);
+            }
+        }
+    }
+    return rt;
+}
+
+void MdSpi::resubscribe_market_data()
+{
+    std::vector<std::string> instruments_copy;
+    {
+        std::lock_guard lock(subscription_mutex_);
+        if (subscribed_instruments_.empty())
+        {
+            return;
+        }
+        instruments_copy = subscribed_instruments_;
+    }
+
+    std::vector<char *> c_strings;
+    c_strings.reserve(instruments_copy.size());
+    for (auto &id : instruments_copy)
+    {
+        c_strings.push_back(id.data());
+    }
+
+    const int rt = md_api_->SubscribeMarketData(c_strings.data(), static_cast<int>(c_strings.size()));
+    if (rt == 0)
+    {
+        spdlog::info("Re-subscribed {} instruments after front reconnection", c_strings.size());
+    }
+    else
+    {
+        spdlog::error("Failed to re-subscribe {} instruments after front reconnection, error code: {}",
+                      c_strings.size(), rt);
+    }
 }
 
 bool MdSpi::wait_for_subscription_completion(std::chrono::seconds timeout)
@@ -176,7 +221,10 @@ void MdSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtd
 
         // Note: trading_day_ and async_file_manager_ will be set by Application
         // using the authoritative TradingDay from TraderSpi via set_trading_day_and_action_days()
-        initialization_tracker_.mark_ready();
+        if (!initialization_tracker_.mark_ready())
+        {
+            resubscribe_market_data();
+        }
     }
     else
     {
@@ -213,7 +261,7 @@ void MdSpi::OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstr
 
 void MdSpi::OnFrontDisconnected(int nReason)
 {
-    // The CTP API reconnects and re-subscribes automatically; just make it visible.
+    // The CTP API reconnects automatically; MdSpi will re-login and re-subscribe upon reconnection.
     spdlog::warn("Market data front disconnected, reason: {:#x} (API will auto-reconnect)", nReason);
 }
 

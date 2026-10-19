@@ -6,8 +6,10 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "cfmdc/config/Config.h"
 #include "cfmdc/core/InitializationTracker.h"
@@ -97,6 +99,8 @@ class MdSpi : public CThostFtdcMdSpi
     void OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData) override;
 
   private:
+    void resubscribe_market_data();
+
     MdApiWrapper md_api_;
     FrontServer server_;
     const Config &config_;
@@ -109,6 +113,8 @@ class MdSpi : public CThostFtdcMdSpi
     std::string action_day_next_;
     InitializationTracker initialization_tracker_;
     SubscriptionTracker subscription_tracker_;
+    mutable std::mutex subscription_mutex_;
+    std::vector<std::string> subscribed_instruments_;
     std::atomic<bool> shutdown_started_{false};
     std::atomic<bool> shutdown_succeeded_{true};
 };

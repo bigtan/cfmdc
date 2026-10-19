@@ -121,4 +121,20 @@ TEST_CASE("SubscriptionTracker requires complete successful responses", "[subscr
         REQUIRE(result.successful());
         REQUIRE(result.succeeded == instrument_count);
     }
+
+    SECTION("re-subscription responses after reconnect complete or preserve state")
+    {
+        SubscriptionTracker tracker;
+        tracker.begin(instruments);
+        tracker.record("rb2505", true, false);
+
+        // Simulate reconnect re-sending both instruments
+        tracker.record("rb2505", true, false);
+        tracker.record("ag2506", true, true);
+
+        REQUIRE(tracker.wait_for_completion(10ms));
+        const auto result = tracker.result();
+        REQUIRE(result.successful());
+        REQUIRE(result.succeeded == 2);
+    }
 }

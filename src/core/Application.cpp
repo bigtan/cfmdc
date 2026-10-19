@@ -22,6 +22,7 @@ namespace cfmdc
 
 // Global flag for graceful shutdown
 static std::atomic<bool> g_shutdown_requested{false};
+static_assert(std::atomic<bool>::is_always_lock_free, "Signal flag must be lock-free");
 
 // Signal handler for graceful shutdown
 void signal_handler(int signal)
@@ -42,6 +43,8 @@ void Application::run()
     std::signal(SIGTERM, signal_handler); // Termination request
 #ifdef _WIN32
     std::signal(SIGBREAK, signal_handler); // Ctrl+Break on Windows
+#else
+    std::signal(SIGHUP, signal_handler); // Terminal hangup on POSIX
 #endif
 
     // Only set file limits for CSV mode (which may open many files
@@ -96,24 +99,13 @@ void Application::run()
         // (MdSpi/AsyncFileManager uses UpdateTime <= 07:00:00 ? next : base for ActionDay)
         if (startup_time_hms < "07:00:00")
         {
-            // Set next as today
             next_action_day = time_utils::format_yyyymmdd(now_tm);
-
-            // Set base as yesterday
-            auto yesterday = now - std::chrono::hours(24);
-            auto yesterday_c = std::chrono::system_clock::to_time_t(yesterday);
-            std::tm yesterday_tm = time_utils::to_local_tm(yesterday_c);
-            base_action_day = time_utils::format_yyyymmdd(yesterday_tm);
+            base_action_day = time_utils::offset_days_yyyymmdd(now_tm, -1);
         }
         else
         {
-            // Normal startup (>= 07:00:00), base is today, next is tomorrow
             base_action_day = time_utils::format_yyyymmdd(now_tm);
-
-            auto tomorrow = now + std::chrono::hours(24);
-            auto tomorrow_c = std::chrono::system_clock::to_time_t(tomorrow);
-            std::tm tomorrow_tm = time_utils::to_local_tm(tomorrow_c);
-            next_action_day = time_utils::format_yyyymmdd(tomorrow_tm);
+            next_action_day = time_utils::offset_days_yyyymmdd(now_tm, 1);
         }
 
         std::string trading_day = trader_spi_->get_trading_day();

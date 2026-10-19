@@ -4,6 +4,7 @@
 #include <string>
 
 #include "cfmdc/utils/MarketDataTimePolicy.h"
+#include "cfmdc/utils/TimeUtils.h"
 
 using namespace cfmdc::market_data_time;
 
@@ -95,4 +96,21 @@ TEST_CASE("Packed HHMMSS comparisons match strcmp semantics for every valid seco
                 (in_range_by_strcmp(hms, "20:55:00", "23:59:59") || in_range_by_strcmp(hms, "00:00:00", "03:00:00")));
         REQUIRE(should_use_next_action_day(hms.c_str()) == (std::strcmp(hms.c_str(), "07:00:00") <= 0));
     }
+}
+
+TEST_CASE("Calendar date offset handles month, year, and leap-year boundaries", "[time_utils]")
+{
+    std::tm jan1{};
+    jan1.tm_year = 2025 - 1900;
+    jan1.tm_mon = 0; // January
+    jan1.tm_mday = 1;
+    REQUIRE(cfmdc::time_utils::offset_days_yyyymmdd(jan1, -1) == "20241231");
+    REQUIRE(cfmdc::time_utils::offset_days_yyyymmdd(jan1, 1) == "20250102");
+
+    std::tm feb28_leap{};
+    feb28_leap.tm_year = 2024 - 1900;
+    feb28_leap.tm_mon = 1; // February
+    feb28_leap.tm_mday = 28;
+    REQUIRE(cfmdc::time_utils::offset_days_yyyymmdd(feb28_leap, 1) == "20240229");
+    REQUIRE(cfmdc::time_utils::offset_days_yyyymmdd(feb28_leap, 2) == "20240301");
 }

@@ -14,6 +14,7 @@
 #endif
 #include <windows.h>
 #else
+#include <iconv.h>
 #include <pthread.h>
 #include <sched.h>
 #endif
@@ -99,6 +100,119 @@ inline double clean_price(double price) noexcept
     return (price == INVALID_PRICE) ? 0.0 : price;
 }
 
+/// @brief Check whether a byte sequence is already valid UTF-8
+inline bool is_valid_utf8(std::string_view input) noexcept
+{
+    const auto *bytes = reinterpret_cast<const unsigned char *>(input.data());
+    size_t i = 0;
+    const size_t len = input.size();
+    while (i < len)
+    {
+        const unsigned char b0 = bytes[i];
+        if (b0 <= 0x7F)
+        {
+            ++i;
+            continue;
+        }
+        if (b0 >= 0xC2 && b0 <= 0xDF)
+        {
+            if (i + 1 >= len || (bytes[i + 1] & 0xC0) != 0x80)
+            {
+                return false;
+            }
+            i += 2;
+        }
+        else if (b0 >= 0xE0 && b0 <= 0xEF)
+        {
+            if (i + 2 >= len || (bytes[i + 1] & 0xC0) != 0x80 || (bytes[i + 2] & 0xC0) != 0x80)
+            {
+                return false;
+            }
+            if (b0 == 0xE0 && bytes[i + 1] < 0xA0)
+            {
+                return false;
+            }
+            if (b0 == 0xED && bytes[i + 1] >= 0xA0)
+            {
+                return false;
+            }
+            i += 3;
+        }
+        else if (b0 >= 0xF0 && b0 <= 0xF4)
+        {
+            if (i + 3 >= len || (bytes[i + 1] & 0xC0) != 0x80 || (bytes[i + 2] & 0xC0) != 0x80 ||
+                (bytes[i + 3] & 0xC0) != 0x80)
+            {
+                return false;
+            }
+            if (b0 == 0xF0 && bytes[i + 1] < 0x90)
+            {
+                return false;
+            }
+            if (b0 == 0xF4 && bytes[i + 1] >= 0x90)
+            {
+                return false;
+            }
+            i += 4;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// @brief Convert GBK/GB2312 string from CTP API into UTF-8
+inline std::string gbk_to_utf8(std::string_view input)
+{
+    if (input.empty() || is_valid_utf8(input))
+    {
+        return std::string(input);
+    }
+
+#ifdef _WIN32
+    constexpr UINT kCodePageGBK = 936;
+    const int wide_len = MultiByteToWideChar(kCodePageGBK, 0, input.data(), static_cast<int>(input.size()), nullptr, 0);
+    if (wide_len <= 0)
+    {
+        return std::string(input);
+    }
+    std::wstring wide_str(static_cast<size_t>(wide_len), L'\0');
+    MultiByteToWideChar(kCodePageGBK, 0, input.data(), static_cast<int>(input.size()), wide_str.data(), wide_len);
+
+    const int utf8_len =
+        WideCharToMultiByte(CP_UTF8, 0, wide_str.data(), wide_len, nullptr, 0, nullptr, nullptr);
+    if (utf8_len <= 0)
+    {
+        return std::string(input);
+    }
+    std::string utf8_str(static_cast<size_t>(utf8_len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide_str.data(), wide_len, utf8_str.data(), utf8_len, nullptr, nullptr);
+    return utf8_str;
+#else
+    iconv_t cd = iconv_open("UTF-8", "GBK");
+    if (cd == reinterpret_cast<iconv_t>(-1))
+    {
+        return std::string(input);
+    }
+    std::string output(input.size() * 3 + 1, '\0');
+    char *in_buf = const_cast<char *>(input.data());
+    size_t in_bytes_left = input.size();
+    char *out_buf = output.data();
+    size_t out_bytes_left = output.size();
+
+    const size_t res = iconv(cd, &in_buf, &in_bytes_left, &out_buf, &out_bytes_left);
+    iconv_close(cd);
+    if (res == static_cast<size_t>(-1))
+    {
+        return std::string(input);
+    }
+    output.resize(output.size() - out_bytes_left);
+    return output;
+#endif
+}
+
 /// @brief Check CTP response and create error object
 /// @param pRspInfo Response info from CTP
 /// @return CtpError object
@@ -106,7 +220,7 @@ inline CtpError check_response(CThostFtdcRspInfoField *pRspInfo)
 {
     if (pRspInfo && pRspInfo->ErrorID != 0)
     {
-        return CtpError{pRspInfo->ErrorID, pRspInfo->ErrorMsg};
+        return CtpError{pRspInfo->ErrorID, gbk_to_utf8(pRspInfo->ErrorMsg)};
     }
     return CtpError{0, ""};
 }

@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "cfmdc/utils/Error.h"
+#include "cfmdc/utils/Helpers.h"
 
 using namespace cfmdc;
 
@@ -76,4 +77,19 @@ TEST_CASE("Exception hierarchy", "[error]")
         ApiException api_ex("API initialization failed");
         REQUIRE(std::string(api_ex.what()) == "API initialization failed");
     }
+}
+
+TEST_CASE("check_response converts GBK error messages to UTF-8", "[error][encoding]")
+{
+    CThostFtdcRspInfoField rsp{};
+    rsp.ErrorID = 3;
+    // "CTP:不合法的登录" encoded in GBK
+    constexpr char kGbkMsg[] = "CTP:\xb2\xbb\xba\xcf\xb7\xa8\xb5\xc4\xb5\xc7\xc2\xbc";
+    safe_strcpy(rsp.ErrorMsg, kGbkMsg);
+
+    const auto err = check_response(&rsp);
+    REQUIRE(err.is_error());
+    REQUIRE(err.error_id() == 3);
+    REQUIRE(is_valid_utf8(err.error_msg()));
+    REQUIRE(err.error_msg() == "CTP:不合法的登录");
 }

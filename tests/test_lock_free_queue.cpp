@@ -57,6 +57,26 @@ TEST_CASE("LockFreeQueue basic operations", "[lockfreequeue]")
     {
         int value;
         REQUIRE_FALSE(queue.try_dequeue(value)); // Should fail when empty
+        REQUIRE(queue.front() == nullptr);
+    }
+
+    SECTION("Zero-copy front and pop")
+    {
+        REQUIRE(queue.try_enqueue(10));
+        REQUIRE(queue.try_enqueue(20));
+
+        int *first = queue.front();
+        REQUIRE(first != nullptr);
+        REQUIRE(*first == 10);
+        queue.pop();
+
+        int *second = queue.front();
+        REQUIRE(second != nullptr);
+        REQUIRE(*second == 20);
+        queue.pop();
+
+        REQUIRE(queue.front() == nullptr);
+        REQUIRE(queue.empty());
     }
 }
 

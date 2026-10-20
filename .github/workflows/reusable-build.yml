@@ -51,6 +51,7 @@ jobs:
               apt-get install -y --no-install-recommends \
                 ca-certificates git build-essential pkg-config tar curl zip unzip \
                 clang clang-tools llvm lld cmake ninja-build python3 autoconf automake libtool flex bison
+              export PATH="$(llvm-config --bindir):$PATH"
               command -v clang-scan-deps llvm-ar llvm-ranlib
               baseline=$(python3 -c "import json; print(json.load(open(\"vcpkg-configuration.json\"))[\"default-registry\"][\"baseline\"])")
               git init /opt/vcpkg

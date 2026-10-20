@@ -56,6 +56,11 @@ cmake --build build
 
 ### Notes
 
+- GitHub CI and Release Linux archives (`cfmdc-*-x64-linux.tar.gz`) are built
+  and tested in Debian 13 containers with Clang and the system libstdc++.
+  The packaged binary is also checked in a clean Debian 13 container before upload.
+  Run these archives on Debian 13 amd64 with `libstdc++6` and `libgcc-s1`
+  installed; keep the bundled CTP `.so` files beside `cfmdc`.
 - Output binary: `build/bin/cfmdc`
 - Default build enables x86-64-v3 (AVX2). Disable if you need older CPUs:
   `-DCFMDC_ENABLE_ARCH_V3=OFF`

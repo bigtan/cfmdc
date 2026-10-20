@@ -17,6 +17,94 @@ permissions:
   contents: read
 
 jobs:
+  build-linux:
+    name: Debian 13 - Release
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_CACHE: ${{ github.workspace }}/.cache/vcpkg
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Restore Debian 13 vcpkg cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.VCPKG_CACHE }}
+          key: debian13-x64-linux-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            debian13-x64-linux-vcpkg-
+
+      - name: Build and test in Debian 13
+        shell: bash
+        run: |
+          mkdir -p "$VCPKG_CACHE"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$VCPKG_CACHE:/vcpkg-cache" \
+            -w /workspace \
+            -e VCPKG_BINARY_SOURCES='clear;files,/vcpkg-cache,readwrite' \
+            debian:13 bash -euo pipefail -c '
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates git build-essential pkg-config tar curl zip unzip \
+                clang lld cmake ninja-build python3 autoconf automake libtool
+              baseline=$(python3 -c "import json; print(json.load(open(\"vcpkg-configuration.json\"))[\"default-registry\"][\"baseline\"])")
+              git init /opt/vcpkg
+              git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+              git -C /opt/vcpkg fetch --depth 1 origin "$baseline"
+              git -C /opt/vcpkg checkout --detach FETCH_HEAD
+              /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+              cmake -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
+                -DVCPKG_TARGET_TRIPLET=x64-linux
+              cmake --build build --parallel 2
+              ctest --test-dir build --output-on-failure
+            '
+
+      - name: Package Linux release
+        shell: bash
+        env:
+          ARTIFACT_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          ref=$(printf '%s' "$ARTIFACT_REF" | sed 's/[^0-9A-Za-z._-]/-/g')
+          test -n "$ref"
+          mkdir -p dist
+          tar -czf "dist/cfmdc-${ref}-x64-linux.tar.gz" -C build/bin .
+
+      - name: Verify packaged binary in clean Debian 13
+        shell: bash
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE/dist:/dist:ro" \
+            debian:13 bash -euo pipefail -c '
+              apt-get update
+              apt-get install -y --no-install-recommends libstdc++6 libgcc-s1
+              mkdir /app
+              tar -xzf /dist/cfmdc-*-x64-linux.tar.gz -C /app
+              cd /app
+              ldd ./cfmdc | tee /tmp/ldd.txt
+              if grep -q "not found" /tmp/ldd.txt; then
+                exit 1
+              fi
+              ./cfmdc --version
+              ./cfmdc --help
+            '
+
+      - name: Make container cache accessible to runner
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$VCPKG_CACHE"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-x64-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
   build:
     name: ${{ matrix.os }} - Release
     runs-on: ${{ matrix.os }}
@@ -24,10 +112,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            triplet: x64-linux
-            vcpkg_cache_path: /home/runner/.cache/vcpkg/archives
-            cmake_args: "-DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang"
           - os: windows-latest
             triplet: x64-windows-static
             vcpkg_cache_path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
@@ -41,12 +125,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config tar curl zip unzip clang lld
 
       - name: Install Ninja
         if: runner.os == 'Windows'
@@ -127,12 +205,6 @@ jobs:
             throw "Failed to derive a sanitized artifact ref from '$ref'"
           }
           "value=$sanitized" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p dist
-          tar -czf dist/cfmdc-${{ steps.artifact-ref.outputs.value }}-${{ matrix.triplet }}.tar.gz -C build/bin .
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

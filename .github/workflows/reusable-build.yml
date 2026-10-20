@@ -28,11 +28,13 @@ jobs:
           submodules: recursive
 
       - name: Restore Debian 13 vcpkg cache
-        uses: actions/cache@v6
+        id: linux-cache
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.VCPKG_CACHE }}
-          key: debian13-x64-linux-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: debian13-x64-linux-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            debian13-x64-linux-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
             debian13-x64-linux-vcpkg-
 
       - name: Build and test in Debian 13
@@ -48,18 +50,23 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends \
                 ca-certificates git build-essential pkg-config tar curl zip unzip \
-                clang lld cmake ninja-build python3 autoconf automake libtool flex bison
+                clang clang-tools llvm lld cmake ninja-build python3 autoconf automake libtool flex bison
+              command -v clang-scan-deps llvm-ar llvm-ranlib
               baseline=$(python3 -c "import json; print(json.load(open(\"vcpkg-configuration.json\"))[\"default-registry\"][\"baseline\"])")
               git init /opt/vcpkg
               git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git
               git -C /opt/vcpkg fetch --depth 1 origin "$baseline"
               git -C /opt/vcpkg checkout --detach FETCH_HEAD
               /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-              cmake -B build -G Ninja \
+              if ! cmake -B build -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
                 -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
-                -DVCPKG_TARGET_TRIPLET=x64-linux
+                -DVCPKG_TARGET_TRIPLET=x64-linux; then
+                cat build/CMakeFiles/CMakeConfigureLog.yaml
+                exit 1
+              fi
               cmake --build build --parallel 2
               ctest --test-dir build --output-on-failure
             '
@@ -96,6 +103,13 @@ jobs:
         if: always()
         shell: bash
         run: sudo chown -R "$(id -u):$(id -g)" "$VCPKG_CACHE"
+
+      - name: Save compiled Debian 13 dependencies
+        if: ${{ always() && !cancelled() && steps.linux-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.VCPKG_CACHE }}
+          key: ${{ steps.linux-cache.outputs.cache-primary-key }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

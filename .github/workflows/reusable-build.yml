@@ -48,7 +48,7 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends \
                 ca-certificates git build-essential pkg-config tar curl zip unzip \
-                clang lld cmake ninja-build python3 autoconf automake libtool
+                clang lld cmake ninja-build python3 autoconf automake libtool flex bison
               baseline=$(python3 -c "import json; print(json.load(open(\"vcpkg-configuration.json\"))[\"default-registry\"][\"baseline\"])")
               git init /opt/vcpkg
               git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git

@@ -37,10 +37,19 @@ void setup_logging()
     }
 }
 
+struct SpdlogShutdownGuard
+{
+    ~SpdlogShutdownGuard()
+    {
+        spdlog::shutdown();
+    }
+};
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    SpdlogShutdownGuard spdlog_guard;
     try
     {
         args::ArgumentParser parser(std::string("CTP Market Data Recorder v") + std::string(cfmdc::APP_VERSION));

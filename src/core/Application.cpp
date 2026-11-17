@@ -4,9 +4,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <csignal>
+#include <cstring>
+#include <filesystem>
 #include <format>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 #ifdef _WIN32
@@ -15,13 +19,19 @@
 #include <sys/resource.h>
 #endif
 
+#include "cfmdc/utils/Helpers.h"
 #include "cfmdc/utils/TimeUtils.h"
 
 namespace cfmdc
 {
 
+namespace
+{
+
+constexpr auto kInterruptiblePollSlice = std::chrono::milliseconds(100);
+
 // Global flag for graceful shutdown
-static std::atomic<bool> g_shutdown_requested{false};
+std::atomic<bool> g_shutdown_requested{false};
 static_assert(std::atomic<bool>::is_always_lock_free, "Signal flag must be lock-free");
 
 // Signal handler for graceful shutdown
@@ -30,6 +40,8 @@ void signal_handler(int signal)
     (void)signal;
     g_shutdown_requested.store(true, std::memory_order_release);
 }
+
+} // namespace
 
 Application::Application(std::string_view config_file)
 {
@@ -47,9 +59,12 @@ void Application::run()
     std::signal(SIGHUP, signal_handler); // Terminal hangup on POSIX
 #endif
 
-    // Only set file limits for CSV mode (which may open many files
-    // simultaneously)
-    auto storage_mode = config_->storage_mode();
+    // Capture startup session dates in fixed UTC+8 (Asia/Shanghai) at the very beginning
+    // before TD/MD connection retries so session windows stay accurate across slow startups.
+    const auto session_dates = time_utils::compute_china_session_dates(std::chrono::system_clock::now());
+
+    // Only set file limits for CSV mode (which may open many files simultaneously)
+    const auto storage_mode = config_->storage_mode();
     if (storage_mode == StorageMode::CSV || storage_mode == StorageMode::HYBRID)
     {
         setup_file_limits();
@@ -60,6 +75,7 @@ void Application::run()
     // Initialize trader SPI with retry across all front servers
     if (!init_trader_with_retry())
     {
+        trader_spi_.reset();
         if (g_shutdown_requested.load(std::memory_order_acquire))
         {
             return;
@@ -67,14 +83,21 @@ void Application::run()
         throw std::runtime_error("All trader front servers failed");
     }
 
-    // Parse subscription list and query instruments
-    std::vector<std::string> instruments;
-    parse_subscription_list(instruments);
-    query_instruments(instruments);
+    // Parse subscription list, issue one full-market query, resolve locally,
+    // and immediately release the TD session before initializing MdSpi.
+    std::vector<std::string> requested_instruments;
+    parse_subscription_list(requested_instruments);
+    const bool query_ok = query_instruments(requested_instruments);
+    trader_spi_.reset();
+    if (!query_ok)
+    {
+        return;
+    }
 
     // Initialize market data SPI with retry across all front servers
     if (!init_md_with_retry())
     {
+        md_spi_.reset();
         if (g_shutdown_requested.load(std::memory_order_acquire))
         {
             return;
@@ -82,38 +105,17 @@ void Application::run()
         throw std::runtime_error("All market data front servers failed");
     }
 
-    // Configure MdSpi with TradingDay from TraderSpi and calculated ActionDays
-    {
-        auto now = std::chrono::system_clock::now();
-        auto now_c = std::chrono::system_clock::to_time_t(now);
-        std::tm now_tm = time_utils::to_local_tm(now_c);
-
-        std::string base_action_day;
-        std::string next_action_day;
-
-        std::string startup_time_hms = time_utils::format_hhmmss(now_tm);
-
-        // Startup time windows:
-        // - < 07:00:00: base=t-1, next=t
-        // - >= 07:00:00: base=t, next=t+1
-        // (MdSpi/AsyncFileManager uses UpdateTime <= 07:00:00 ? next : base for ActionDay)
-        if (startup_time_hms < "07:00:00")
-        {
-            next_action_day = time_utils::format_yyyymmdd(now_tm);
-            base_action_day = time_utils::offset_days_yyyymmdd(now_tm, -1);
-        }
-        else
-        {
-            base_action_day = time_utils::format_yyyymmdd(now_tm);
-            next_action_day = time_utils::offset_days_yyyymmdd(now_tm, 1);
-        }
-
-        std::string trading_day = trader_spi_->get_trading_day();
-        md_spi_->set_trading_day_and_action_days(trading_day, base_action_day, next_action_day, startup_time_hms);
-    }
+    // Configure MdSpi with authoritative TradingDay from TraderSpi and startup session dates
+    md_spi_->set_trading_day_and_action_days(trading_day_, session_dates.base_action_day,
+                                             session_dates.next_action_day, session_dates.startup_time_hms);
 
     // Subscribe to market data
-    subscribe_market_data();
+    if (!subscribe_market_data())
+    {
+        (void)md_spi_->shutdown();
+        md_spi_.reset();
+        return;
+    }
 
     spdlog::info("Market data subscription successful, starting to receive data...");
     spdlog::info("Press Ctrl+C to stop the application");
@@ -125,8 +127,11 @@ void Application::run()
     while (!g_shutdown_requested.load(std::memory_order_acquire))
     {
         std::this_thread::sleep_for(kHealthCheckInterval);
+        md_spi_->check_pipeline_health();
         if (md_spi_->has_fatal_pipeline_error())
         {
+            (void)md_spi_->shutdown();
+            md_spi_.reset();
             throw std::runtime_error("Market data storage pipeline failed");
         }
 
@@ -165,45 +170,65 @@ void Application::setup_file_limits()
         spdlog::info("Set file handle limit to {} on Windows", FILE_HANDLE_LIMIT);
     }
 #else
-    struct rlimit rl;
-    rl.rlim_cur = FILE_HANDLE_LIMIT;
-    rl.rlim_max = FILE_HANDLE_LIMIT;
-    if (setrlimit(RLIMIT_NOFILE, &rl) == -1)
+    struct rlimit rl{};
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
     {
-        spdlog::warn("Failed to set file descriptor limit to {} on Linux", FILE_HANDLE_LIMIT);
+        spdlog::warn("Failed to query file descriptor limit (RLIMIT_NOFILE) on Linux: {}", std::strerror(errno));
+        return;
+    }
+
+    const rlim_t target = static_cast<rlim_t>(FILE_HANDLE_LIMIT);
+    if (rl.rlim_cur >= target)
+    {
+        spdlog::info("File descriptor limit ({}) already meets target ({}) on Linux", rl.rlim_cur, target);
+        return;
+    }
+
+    const rlim_t desired_cur = (std::min)(target, rl.rlim_max);
+    if (desired_cur <= rl.rlim_cur)
+    {
+        spdlog::warn("File descriptor soft limit ({}) is capped by hard limit ({}) below target ({})", rl.rlim_cur,
+                     rl.rlim_max, target);
+        return;
+    }
+
+    rl.rlim_cur = desired_cur;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0)
+    {
+        spdlog::warn("Failed to raise file descriptor limit to {} on Linux: {}", desired_cur, std::strerror(errno));
     }
     else
     {
-        spdlog::info("Set file descriptor limit to {} on Linux", FILE_HANDLE_LIMIT);
+        spdlog::info("Raised file descriptor soft limit to {} (hard limit: {}) on Linux", desired_cur, rl.rlim_max);
     }
 #endif
 }
 
 void Application::ensure_flow_directory()
 {
-    std::filesystem::path flow_dir = config_->flow_path();
-
-    // Ensure the path represents a directory (not a file)
-    // If it doesn't end with a separator, filesystem will treat it correctly
-    if (!std::filesystem::exists(flow_dir))
+    const std::filesystem::path flow_dir = config_->flow_path();
+    for (const auto &dir : {flow_dir, flow_dir / "td", flow_dir / "md"})
     {
-        std::error_code ec;
-        std::filesystem::create_directories(flow_dir, ec);
-        if (ec)
+        if (!std::filesystem::exists(dir))
         {
-            throw std::runtime_error("Failed to create flow directory: " + ec.message());
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            if (ec)
+            {
+                throw std::runtime_error("Failed to create flow directory '" + dir.string() + "': " + ec.message());
+            }
+            spdlog::info("Created flow directory: {}", dir.string());
         }
-        spdlog::info("Created flow directory: {}", flow_dir.string());
-    }
-    else if (!std::filesystem::is_directory(flow_dir))
-    {
-        throw std::runtime_error("Flow path exists but is not a directory: " + flow_dir.string());
+        else if (!std::filesystem::is_directory(dir))
+        {
+            throw std::runtime_error("Flow path exists but is not a directory: " + dir.string());
+        }
     }
 }
 
 void Application::parse_subscription_list(std::vector<std::string> &instruments)
 {
-    const std::string sub_list = config_->subscription_list();
+    const std::string &sub_list = config_->subscription_list();
     if (sub_list != "null" && !sub_list.empty())
     {
         std::stringstream ss(sub_list);
@@ -219,100 +244,153 @@ void Application::parse_subscription_list(std::vector<std::string> &instruments)
     }
 }
 
-void Application::query_instruments(const std::vector<std::string> &instruments)
+bool Application::query_instruments(const std::vector<std::string> &requested)
 {
     const auto timeout = std::chrono::seconds(config_->init_timeout());
-    auto request_with_retry = [this, timeout](std::string_view instrument) {
-        const auto start_time = std::chrono::steady_clock::now();
+
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!g_shutdown_requested.load(std::memory_order_acquire))
         {
-            if (trader_spi_->request_query_instrument(instrument) == 0)
+            if (trader_spi_->request_query_instrument("") == 0)
             {
-                return;
+                break;
             }
 
-            if (std::chrono::steady_clock::now() - start_time >= timeout)
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
             {
-                throw std::runtime_error(std::format("Instrument query request timed out for '{}'", instrument));
+                throw std::runtime_error("Instrument query request timed out");
             }
 
-            std::this_thread::sleep_for(SLEEP_DURATION);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            std::this_thread::sleep_for((std::min)(remaining, kInterruptiblePollSlice));
         }
+    }
 
-        throw std::runtime_error("Shutdown requested during instrument query");
-    };
-
-    if (instruments.empty())
+    if (g_shutdown_requested.load(std::memory_order_acquire))
     {
-        // Query all instruments
-        request_with_retry("");
-        if (!trader_spi_->wait_for_instrument_query_completion(timeout))
+        spdlog::info("Shutdown requested during instrument query");
+        return false;
+    }
+
+    bool query_completed = false;
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!g_shutdown_requested.load(std::memory_order_acquire))
         {
-            throw std::runtime_error("Timed out while waiting for full instrument list");
-        }
-        spdlog::info("Query all instruments completed");
-    }
-    else
-    {
-        // Query specific instruments
-        for (const auto &instrument : instruments)
-        {
-            spdlog::info("Querying instrument: {}", instrument);
-            request_with_retry(instrument);
-            if (!trader_spi_->wait_for_instrument_query_completion(timeout))
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
             {
-                throw std::runtime_error(std::format("Timed out while waiting for instrument '{}'", instrument));
+                query_completed = trader_spi_->wait_for_instrument_query_completion(std::chrono::milliseconds::zero());
+                break;
             }
-            spdlog::info("Query instrument {} completed", instrument);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            if (trader_spi_->wait_for_instrument_query_completion((std::min)(remaining, kInterruptiblePollSlice)))
+            {
+                query_completed = true;
+                break;
+            }
         }
     }
 
-    if (trader_spi_->get_instrument_ids().empty())
+    if (g_shutdown_requested.load(std::memory_order_acquire))
     {
-        throw std::runtime_error("Instrument query returned no subscribable futures contracts");
+        spdlog::info("Shutdown requested while waiting for instrument query");
+        return false;
     }
+
+    if (!query_completed)
+    {
+        throw std::runtime_error("Timed out while waiting for full instrument list");
+    }
+    spdlog::info("Full-market instrument query completed");
+
+    trading_day_ = trader_spi_->get_trading_day();
+    if (!is_valid_trading_day(trading_day_))
+    {
+        throw std::runtime_error(std::format("Invalid trading day received from trader front: '{}'", trading_day_));
+    }
+
+    subscribed_instruments_ = trader_spi_->resolve_subscription_instruments(requested, config_->include_options());
+    if (subscribed_instruments_.empty())
+    {
+        throw std::runtime_error("Instrument query returned no subscribable contracts");
+    }
+
+    spdlog::info("Resolved {} subscribable instrument(s) for trading day {}", subscribed_instruments_.size(),
+                 trading_day_);
+    return true;
 }
 
-void Application::subscribe_market_data()
+bool Application::subscribe_market_data()
 {
-    const auto instrument_ids = trader_spi_->get_instrument_ids();
-    if (instrument_ids.empty())
+    if (subscribed_instruments_.empty())
     {
         throw std::runtime_error("No instrument IDs available for market data subscription");
     }
 
     // Convert to char* array for CTP API
     std::vector<char *> c_strings;
-    c_strings.reserve(instrument_ids.size());
-
-    for (const auto &id : instrument_ids)
+    c_strings.reserve(subscribed_instruments_.size());
+    for (const auto &id : subscribed_instruments_)
     {
         c_strings.push_back(const_cast<char *>(id.c_str()));
     }
 
     const auto timeout = std::chrono::seconds(config_->init_timeout());
-    const auto start_time = std::chrono::steady_clock::now();
-    while (!g_shutdown_requested.load(std::memory_order_acquire))
     {
-        if (md_spi_->subscribe_market_data(c_strings) == 0)
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!g_shutdown_requested.load(std::memory_order_acquire))
         {
-            break;
-        }
+            if (md_spi_->subscribe_market_data(c_strings) == 0)
+            {
+                break;
+            }
 
-        if (std::chrono::steady_clock::now() - start_time >= timeout)
-        {
-            throw std::runtime_error("Market data subscription request timed out");
-        }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                throw std::runtime_error("Market data subscription request timed out");
+            }
 
-        std::this_thread::sleep_for(SLEEP_DURATION);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            std::this_thread::sleep_for((std::min)(remaining, kInterruptiblePollSlice));
+        }
     }
 
     if (g_shutdown_requested.load(std::memory_order_acquire))
     {
-        throw std::runtime_error("Shutdown requested during market data subscription");
+        spdlog::info("Shutdown requested during market data subscription");
+        return false;
     }
 
-    const bool completed = md_spi_->wait_for_subscription_completion(timeout);
+    bool completed = false;
+    {
+        const auto wait_deadline = std::chrono::steady_clock::now() + timeout;
+        while (!g_shutdown_requested.load(std::memory_order_acquire))
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= wait_deadline)
+            {
+                completed = md_spi_->wait_for_subscription_completion(std::chrono::milliseconds::zero());
+                break;
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(wait_deadline - now);
+            if (md_spi_->wait_for_subscription_completion((std::min)(remaining, kInterruptiblePollSlice)))
+            {
+                completed = true;
+                break;
+            }
+        }
+    }
+
+    if (g_shutdown_requested.load(std::memory_order_acquire))
+    {
+        spdlog::info("Shutdown requested while waiting for market data subscription responses");
+        return false;
+    }
+
     const auto result = md_spi_->subscription_result();
     if (!completed && !result.completed)
     {
@@ -330,6 +408,7 @@ void Application::subscribe_market_data()
     }
 
     spdlog::info("Confirmed market data subscriptions: {} instruments", result.succeeded);
+    return true;
 }
 
 WaitStatus Application::wait_for_initialization(
@@ -353,8 +432,7 @@ WaitStatus Application::wait_for_initialization(
         }
 
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        const auto wait_slice =
-            (std::min)(remaining, std::chrono::duration_cast<std::chrono::milliseconds>(SLEEP_DURATION));
+        const auto wait_slice = (std::min)(remaining, kInterruptiblePollSlice);
         const auto result = wait_for_result(wait_slice);
         if (result.ready())
         {
@@ -377,6 +455,7 @@ WaitStatus Application::wait_for_initialization(
 bool Application::init_trader_with_retry()
 {
     const auto &servers = config_->front_servers();
+    const auto td_flow_dir = config_->flow_path() / "td";
 
     for (size_t i = 0; i < servers.size(); ++i)
     {
@@ -392,7 +471,7 @@ bool Application::init_trader_with_retry()
         try
         {
             // Create new trader SPI with current server
-            trader_spi_ = std::make_unique<TraderSpi>(server, config_->flow_path());
+            trader_spi_ = std::make_unique<TraderSpi>(server, td_flow_dir);
             trader_spi_->init();
 
             // Wait for initialization
@@ -410,7 +489,7 @@ bool Application::init_trader_with_retry()
                 return false;
             }
 
-            // Timeout - try next server
+            // Timeout or explicit failure - try next server
             spdlog::warn("Trader initialization failed with server {}: {}, trying next "
                          "server...",
                          i + 1, server.td_url());
@@ -429,6 +508,7 @@ bool Application::init_trader_with_retry()
 bool Application::init_md_with_retry()
 {
     const auto &servers = config_->front_servers();
+    const auto md_flow_dir = config_->flow_path() / "md";
 
     for (size_t i = 0; i < servers.size(); ++i)
     {
@@ -446,7 +526,7 @@ bool Application::init_md_with_retry()
         {
             // Create new MD SPI with current server
             // Paths will be resolved in MdSpi after trading day is received
-            md_spi_ = std::make_unique<MdSpi>(server, *config_, config_->flow_path());
+            md_spi_ = std::make_unique<MdSpi>(server, *config_, md_flow_dir);
             md_spi_->init();
 
             // Wait for initialization
@@ -464,7 +544,7 @@ bool Application::init_md_with_retry()
                 return false;
             }
 
-            // Timeout - try next server
+            // Timeout or explicit failure - try next server
             spdlog::warn("Market data initialization failed with server {}: {}, trying next "
                          "server...",
                          i + 1, server.md_url());

@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cfmdc/config/Config.h"
@@ -49,8 +50,8 @@ class Application
     void setup_file_limits();
     void ensure_flow_directory();
     void parse_subscription_list(std::vector<std::string> &instruments);
-    void query_instruments(const std::vector<std::string> &instruments);
-    void subscribe_market_data();
+    bool query_instruments(const std::vector<std::string> &requested);
+    bool subscribe_market_data();
     WaitStatus wait_for_initialization(
         const std::function<InitializationResult(std::chrono::milliseconds)> &wait_for_result,
         std::string_view operation);
@@ -62,6 +63,8 @@ class Application
     std::unique_ptr<Config> config_;
     std::unique_ptr<TraderSpi> trader_spi_;
     std::unique_ptr<MdSpi> md_spi_;
+    std::string trading_day_;
+    std::vector<std::string> subscribed_instruments_;
 };
 
 } // namespace cfmdc

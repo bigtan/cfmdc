@@ -4,9 +4,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -53,7 +54,11 @@ class MdSpi : public CThostFtdcMdSpi
     int subscribe_market_data(std::span<char *> instrument_ids);
 
     /// @brief Wait until every requested instrument has a subscription response
-    bool wait_for_subscription_completion(std::chrono::seconds timeout);
+    template <typename Rep, typename Period>
+    bool wait_for_subscription_completion(std::chrono::duration<Rep, Period> timeout)
+    {
+        return subscription_tracker_.wait_for_completion(timeout);
+    }
 
     /// @brief Get the aggregate subscription result
     SubscriptionTracker::Result subscription_result() const;
@@ -78,10 +83,13 @@ class MdSpi : public CThostFtdcMdSpi
     void set_trading_day_and_action_days(const std::string &trading_day, const std::string &base_action_day,
                                          const std::string &next_action_day, const std::string &startup_time_hms);
 
+    /// @brief Poll pipeline health from the main thread (drop warnings and non-blocking reconnect retries)
+    void check_pipeline_health();
+
     /// @brief Log pipeline statistics (records stored, queue depth, drops)
     void log_statistics() const;
 
-    /// @brief Check whether asynchronous storage encountered a fatal error
+    /// @brief Check whether asynchronous storage or reconnect re-subscription encountered a fatal error
     bool has_fatal_pipeline_error() const noexcept;
 
     /// @brief Stop callbacks and flush storage
@@ -99,6 +107,7 @@ class MdSpi : public CThostFtdcMdSpi
     void OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData) override;
 
   private:
+    int send_resubscribe_request(std::span<char *> instruments, size_t attempt);
     void resubscribe_market_data();
 
     MdApiWrapper md_api_;
@@ -115,6 +124,11 @@ class MdSpi : public CThostFtdcMdSpi
     SubscriptionTracker subscription_tracker_;
     std::atomic<bool> shutdown_started_{false};
     std::atomic<bool> shutdown_succeeded_{true};
+
+    // Main-thread health check state
+    size_t last_reported_dropped_{0};
+    std::optional<std::chrono::steady_clock::time_point> last_drop_warning_time_;
+    bool resubscribe_failure_logged_{false};
 };
 
 } // namespace cfmdc

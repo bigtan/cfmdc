@@ -1,6 +1,10 @@
 #include "cfmdc/core/TraderSpi.h"
 
+#include <algorithm>
 #include <format>
+#include <ranges>
+#include <stdexcept>
+#include <unordered_set>
 
 #include "cfmdc/utils/Constants.h"
 
@@ -21,9 +25,10 @@ TraderSpi::TraderSpi(const FrontServer &server, const std::filesystem::path &flo
 TraderSpi::~TraderSpi()
 {
     spdlog::info("TraderSpi destructor called - releasing API...");
-    // Release the API before the members the callbacks touch (mutexes, vectors)
+    // Release the API before the members the callbacks touch (mutexes, maps)
     // are destroyed, so no in-flight callback can race with member destruction.
     trader_api_.reset();
+    server_.clear_secrets();
 }
 
 void TraderSpi::init()
@@ -33,6 +38,10 @@ void TraderSpi::init()
 
 int TraderSpi::request_query_instrument(std::string_view instrument_id)
 {
+    {
+        std::unique_lock cat_lock(instrument_mutex_);
+        instrument_catalog_.clear();
+    }
     {
         std::lock_guard lock(instrument_query_mutex_);
         instrument_query_completed_ = false;
@@ -54,8 +63,71 @@ int TraderSpi::request_query_instrument(std::string_view instrument_id)
 
 std::vector<std::string> TraderSpi::get_instrument_ids() const
 {
+    return resolve_subscription_instruments({}, false);
+}
+
+std::vector<std::string> TraderSpi::resolve_subscription_instruments(const std::vector<std::string> &requested,
+                                                                   bool include_options) const
+{
     std::shared_lock lock(instrument_mutex_);
-    return instrument_ids_; // Return copy for thread safety
+    std::vector<std::string> resolved;
+
+    if (requested.empty())
+    {
+        resolved.reserve(instrument_catalog_.size());
+        for (const auto &[instrument_id, product_class] : instrument_catalog_)
+        {
+            const bool is_future = (product_class == THOST_FTDC_PC_Futures);
+            const bool is_option =
+                (product_class == THOST_FTDC_PC_Options || product_class == THOST_FTDC_PC_SpotOption);
+            if (is_future || (include_options && is_option))
+            {
+                resolved.push_back(instrument_id);
+            }
+        }
+        std::ranges::sort(resolved);
+        const auto [first, last] = std::ranges::unique(resolved);
+        resolved.erase(first, last);
+        return resolved;
+    }
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(requested.size());
+    resolved.reserve(requested.size());
+    std::vector<std::string> missing;
+
+    for (const auto &instrument_id : requested)
+    {
+        if (!seen.insert(instrument_id).second)
+        {
+            continue;
+        }
+        if (!instrument_catalog_.contains(instrument_id))
+        {
+            missing.push_back(instrument_id);
+        }
+        else
+        {
+            resolved.push_back(instrument_id);
+        }
+    }
+
+    if (!missing.empty())
+    {
+        std::string missing_list;
+        for (size_t i = 0; i < missing.size(); ++i)
+        {
+            if (i > 0)
+            {
+                missing_list += ", ";
+            }
+            missing_list += missing[i];
+        }
+        throw std::runtime_error(
+            std::format("Requested instrument(s) not found in queried CTP catalog: {}", missing_list));
+    }
+
+    return resolved;
 }
 
 void TraderSpi::OnFrontDisconnected(int nReason)
@@ -137,13 +209,14 @@ void TraderSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThos
             return;
         }
 
+        const std::string_view trading_day = bounded_sv(pRspUserLogin->TradingDay);
         spdlog::info("Account login successful...");
-        spdlog::info("Trading Day: {}", pRspUserLogin->TradingDay);
+        spdlog::info("Trading Day: {}", trading_day);
         spdlog::info("Broker ID: {}", server_.broker_id());
 
         {
             std::unique_lock lock(trading_day_mutex_);
-            trading_day_ = pRspUserLogin->TradingDay;
+            trading_day_.assign(trading_day);
         }
 
         CThostFtdcSettlementInfoConfirmField settlement_confirm_req{};
@@ -202,20 +275,27 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         spdlog::error("Instrument query error - ErrorID: {}, ErrorMsg: {}", error.error_id(), error.error_msg());
     }
 
-    if (pInstrument && pInstrument->ProductClass == THOST_FTDC_APC_FutureSingle)
+    if (pInstrument)
     {
-        spdlog::debug("Instrument {} query successful...", pInstrument->InstrumentID);
+        const std::string_view instrument_id = bounded_sv(pInstrument->InstrumentID);
+        if (!is_safe_instrument_id(instrument_id))
+        {
+            spdlog::warn("Ignoring instrument with unsafe ID (length: {}) from CTP query", instrument_id.size());
+        }
+        else
+        {
+            spdlog::debug("Instrument {} query successful...", instrument_id);
 
-        std::unique_lock lock(instrument_mutex_);
-        instrument_ids_.emplace_back(pInstrument->InstrumentID);
+            std::unique_lock lock(instrument_mutex_);
+            instrument_catalog_.insert_or_assign(std::string(instrument_id), pInstrument->ProductClass);
+        }
     }
 
     if (bIsLast)
     {
         {
             std::shared_lock lock(instrument_mutex_);
-            spdlog::info("Instrument query completed, {} subscribable futures contracts collected",
-                         instrument_ids_.size());
+            spdlog::info("Instrument query completed, {} valid instruments collected", instrument_catalog_.size());
         }
 
         std::lock_guard lock(instrument_query_mutex_);
@@ -223,17 +303,6 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         instrument_query_completed_ = true;
         instrument_query_cv_.notify_all();
     }
-}
-
-bool TraderSpi::wait_for_instrument_query_completion(std::chrono::seconds timeout)
-{
-    std::unique_lock lock(instrument_query_mutex_);
-    if (!instrument_query_in_flight_)
-    {
-        return instrument_query_completed_;
-    }
-
-    return instrument_query_cv_.wait_for(lock, timeout, [this]() { return instrument_query_completed_; });
 }
 
 } // namespace cfmdc

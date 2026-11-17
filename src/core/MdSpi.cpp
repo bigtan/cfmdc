@@ -49,43 +49,33 @@ int MdSpi::subscribe_market_data(std::span<char *> instrument_ids)
     return rt;
 }
 
-void MdSpi::resubscribe_market_data()
+int MdSpi::send_resubscribe_request(std::span<char *> instruments, size_t attempt)
 {
-    static constexpr size_t kMaxAttempts = SubscriptionTracker::kDefaultResubscribeAttempts;
-    const bool succeeded = subscription_tracker_.resubscribe_with_retry(
-        [this](std::span<char *> instruments, size_t attempt) {
-            const int rt = md_api_->SubscribeMarketData(instruments.data(), static_cast<int>(instruments.size()));
-            if (rt == 0)
-            {
-                spdlog::info("Re-subscribed {} instruments after front reconnection (attempt {}/{})",
-                             instruments.size(), attempt, kMaxAttempts);
-            }
-            else if (attempt < kMaxAttempts)
-            {
-                spdlog::warn(
-                    "Failed to re-subscribe {} instruments on attempt {}/{} (error code: {}), retrying...",
-                    instruments.size(), attempt, kMaxAttempts, rt);
-            }
-            else
-            {
-                spdlog::critical(
-                    "Exhausted all {} attempts to re-subscribe {} instruments after reconnection (error code: {})",
-                    kMaxAttempts, instruments.size(), rt);
-            }
-            return rt;
-        },
-        kMaxAttempts, SubscriptionTracker::kDefaultResubscribeDelay,
-        [this]() { return shutdown_started_.load(std::memory_order_acquire); });
-
-    if (!succeeded && !shutdown_started_.load(std::memory_order_acquire))
+    if (!md_api_ || shutdown_started_.load(std::memory_order_acquire))
     {
-        spdlog::critical("Marking market data pipeline as failed due to unrecoverable re-subscription failure");
+        return -1;
     }
+
+    const int rt = md_api_->SubscribeMarketData(instruments.data(), static_cast<int>(instruments.size()));
+    if (rt == 0)
+    {
+        spdlog::info("Re-subscribed {} instruments after front reconnection (attempt {}/{})", instruments.size(),
+                     attempt, SubscriptionTracker::kDefaultResubscribeAttempts);
+    }
+    else
+    {
+        spdlog::warn("Failed to re-subscribe {} instruments on attempt {}/{} (error code: {})", instruments.size(),
+                     attempt, SubscriptionTracker::kDefaultResubscribeAttempts, rt);
+    }
+    return rt;
 }
 
-bool MdSpi::wait_for_subscription_completion(std::chrono::seconds timeout)
+void MdSpi::resubscribe_market_data()
 {
-    return subscription_tracker_.wait_for_completion(timeout);
+    // Try once immediately without blocking/sleeping on CTP's network callback thread.
+    // Further retries and response-timeout handling are driven by check_pipeline_health().
+    (void)subscription_tracker_.begin_reconnect_resubscribe(
+        [this](std::span<char *> instruments, size_t attempt) { return send_resubscribe_request(instruments, attempt); });
 }
 
 SubscriptionTracker::Result MdSpi::subscription_result() const
@@ -129,6 +119,50 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
     file_manager_.store(async_file_manager_.get(), std::memory_order_release);
 }
 
+void MdSpi::check_pipeline_health()
+{
+    if (auto *file_manager = file_manager_.load(std::memory_order_acquire))
+    {
+        const auto stats = file_manager->get_statistics();
+        if (stats.dropped_records > last_reported_dropped_)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (!last_drop_warning_time_.has_value() || now - *last_drop_warning_time_ >= std::chrono::seconds(1))
+            {
+                const size_t newly_dropped = stats.dropped_records - last_reported_dropped_;
+                spdlog::warn("Market data ingestion queue full: {} record(s) dropped since last report "
+                             "(total dropped: {}, queue depth: {})",
+                             newly_dropped, stats.dropped_records, stats.queue_size);
+                last_reported_dropped_ = stats.dropped_records;
+                last_drop_warning_time_ = now;
+            }
+        }
+    }
+
+    const bool stopping = shutdown_started_.load(std::memory_order_acquire) || !md_api_;
+    const auto prev_state = subscription_tracker_.resubscribe_state();
+    const size_t prev_attempt = subscription_tracker_.resubscribe_attempt();
+    const auto state = subscription_tracker_.poll_resubscribe(
+        [this](std::span<char *> instruments, size_t attempt) { return send_resubscribe_request(instruments, attempt); },
+        stopping);
+
+    if (prev_state == SubscriptionTracker::ResubscribeState::WaitingResponse &&
+        state == SubscriptionTracker::ResubscribeState::WaitingRetry)
+    {
+        spdlog::warn("Market data re-subscription attempt {}/{} did not complete cleanly within deadline; "
+                     "scheduling retry",
+                     prev_attempt, SubscriptionTracker::kDefaultResubscribeAttempts);
+    }
+
+    if (state == SubscriptionTracker::ResubscribeState::Failed && !resubscribe_failure_logged_)
+    {
+        resubscribe_failure_logged_ = true;
+        spdlog::critical("Exhausted all {} attempts to re-subscribe instruments after reconnection; "
+                         "marking market data pipeline as failed",
+                         SubscriptionTracker::kDefaultResubscribeAttempts);
+    }
+}
+
 void MdSpi::log_statistics() const
 {
     auto *file_manager = file_manager_.load(std::memory_order_acquire);
@@ -163,6 +197,7 @@ bool MdSpi::shutdown()
 
     // Release the API first so callbacks cannot race with queue teardown.
     md_api_.reset();
+    server_.clear_secrets();
     file_manager_.store(nullptr, std::memory_order_release);
 
     bool success = !subscription_tracker_.has_resubscription_failure();
@@ -211,11 +246,16 @@ void MdSpi::OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, CThostFtd
             return;
         }
 
+        const std::string_view trading_day = bounded_sv(pRspUserLogin->TradingDay);
+        const std::string_view login_time = bounded_sv(pRspUserLogin->LoginTime);
+        const std::string_view broker_id = bounded_sv(pRspUserLogin->BrokerID);
+        const std::string_view user_id = bounded_sv(pRspUserLogin->UserID);
+
         spdlog::info("Login response received...");
-        spdlog::info("Trading Day: {}", pRspUserLogin->TradingDay);
-        spdlog::info("Login Time: {}", pRspUserLogin->LoginTime);
-        spdlog::info("Broker: {}", pRspUserLogin->BrokerID);
-        spdlog::info("Account: {}", pRspUserLogin->UserID);
+        spdlog::info("Trading Day: {}", trading_day);
+        spdlog::info("Login Time: {}", login_time);
+        spdlog::info("Broker: {}", broker_id);
+        spdlog::info("Account: {}", user_id);
 
         // Note: trading_day_ and async_file_manager_ will be set by Application
         // using the authoritative TradingDay from TraderSpi via set_trading_day_and_action_days()
@@ -236,14 +276,15 @@ void MdSpi::OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstr
                                int /*nRequestID*/, bool bIsLast)
 {
     auto error = check_response(pRspInfo);
-    const std::string_view instrument_id = pSpecificInstrument ? pSpecificInstrument->InstrumentID : "";
+    const std::string_view instrument_id =
+        pSpecificInstrument ? bounded_sv(pSpecificInstrument->InstrumentID) : std::string_view{};
     subscription_tracker_.record(instrument_id, !error.is_error(), bIsLast);
 
     if (!error.is_error())
     {
         if (pSpecificInstrument)
         {
-            spdlog::debug("Instrument {} subscribed successfully", pSpecificInstrument->InstrumentID);
+            spdlog::debug("Instrument {} subscribed successfully", instrument_id);
         }
         else if (!bIsLast)
         {
@@ -260,6 +301,7 @@ void MdSpi::OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstr
 void MdSpi::OnFrontDisconnected(int nReason)
 {
     // The CTP API reconnects automatically; MdSpi will re-login and re-subscribe upon reconnection.
+    subscription_tracker_.on_disconnected();
     spdlog::warn("Market data front disconnected, reason: {:#x} (API will auto-reconnect)", nReason);
 }
 
@@ -273,19 +315,9 @@ void MdSpi::OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketDat
     auto *file_manager = file_manager_.load(std::memory_order_acquire);
     if (pDepthMarketData && file_manager)
     {
-        // High-performance: just enqueue data
-        // Data correction (TradingDay/ActionDay) is now handled in AsyncFileManager consumer thread
-        if (!file_manager->write_market_data_async(*pDepthMarketData))
-        {
-            // Optional: log queue full condition, but avoid frequent logging
-            static thread_local auto last_warning = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_warning > std::chrono::seconds(1))
-            {
-                spdlog::warn("Market data queue is full, dropping data for {}", pDepthMarketData->InstrumentID);
-                last_warning = now;
-            }
-        }
+        // High-performance lock-free/I/O-free hot path: overflow count is tracked atomically
+        // in LockFreeQueue and warned from the main loop via check_pipeline_health().
+        (void)file_manager->write_market_data_async(*pDepthMarketData);
     }
 }
 

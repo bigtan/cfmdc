@@ -12,7 +12,7 @@ Current project version: `0.1.5`.
 - Single-shot full-market `ReqQryInstrument("")` with local filtering (`SubList`, `IncludeOptions`) and instrument ID safety validation
 - Environment variable credential overrides (`CFMDC_BROKER_ID`, `CFMDC_USER_ID`, `CFMDC_PASSWORD`, `CFMDC_AUTH_CODE`, `CFMDC_APP_ID`)
 - Async storage pipeline with compact `MarketTick` snapshots, lock-free SPSC queues, and cpuset-aware thread affinity (`WorkerThreadCore`, `ParquetWorkerThreadCore`)
-- CSV / Parquet / Hybrid storage modes with 44 columns (including `RecvTimeNs`), empty CSV / Parquet `NULL` for invalid CTP prices, preserved `0.0`, and full-precision decimal `Turnover`
+- CSV / Parquet / Hybrid storage modes with the exact 43 CTP columns (ending with `ActionDay`), empty CSV / Parquet `NULL` for invalid CTP prices, preserved `0.0`, and full-precision decimal `Turnover`
 - Fixed `UTC+8` (`Asia/Shanghai`) startup window and `ActionDay` calculation (safe in UTC Docker containers without `TZ`)
 - Modern CMake (`cfmdc_storage` / `cfmdc_core` static targets) + vcpkg manifest workflow
 
@@ -174,8 +174,8 @@ Version metadata is managed from a single source in `CMakeLists.txt` via
 
 - CSV: one file per instrument, named `{InstrumentID}_{TradingDay}.csv`
 - Parquet: single timestamped file per run in `ParquetPath`
-- 44 columns: the 43 CTP market data fields plus `RecvTimeNs` (nanosecond epoch
-  timestamp captured in `OnRtnDepthMarketData`) as the 44th column
+- 43 columns: preserves the exact original 43 CTP market data fields (ending
+  with `ActionDay`)
 - Invalid CTP prices (`DBL_MAX`, `-DBL_MAX`, `NaN`, `±Inf`) are written as empty
   fields in CSV and `NULL` in Parquet, while genuine `0.0` (and valid negative
   spread prices) are preserved; `Turnover` retains full decimal precision in CSV

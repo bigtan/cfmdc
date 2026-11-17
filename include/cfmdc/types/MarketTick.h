@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <type_traits>
 
@@ -11,18 +10,9 @@
 namespace cfmdc
 {
 
-/// @brief Return current wall-clock timestamp as nanoseconds since Unix epoch
-inline int64_t now_epoch_ns() noexcept
-{
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
 /// @brief Compact, trivially copyable market tick decoupled from raw CTP struct padding and reserved fields
 struct MarketTick
 {
-    int64_t recv_time_ns{0};
-
     double last_price{0.0};
     double pre_settlement_price{0.0};
     double pre_close_price{0.0};
@@ -54,10 +44,9 @@ struct MarketTick
     char instrument_id[64]{};
 
     /// @brief Construct a MarketTick from a raw CTP depth market data field
-    static MarketTick from_ctp(const CThostFtdcDepthMarketDataField &raw, int64_t recv_ns = now_epoch_ns()) noexcept
+    static MarketTick from_ctp(const CThostFtdcDepthMarketDataField &raw) noexcept
     {
         MarketTick tick;
-        tick.recv_time_ns = recv_ns;
 
         tick.last_price = raw.LastPrice;
         tick.pre_settlement_price = raw.PreSettlementPrice;

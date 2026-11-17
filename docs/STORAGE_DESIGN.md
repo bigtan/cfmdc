@@ -62,7 +62,7 @@ ParquetPath = "./data/{year}/{month}/parquet/{tradingday}"
 
 ```
 OnRtnDepthMarketData
-  -> 采集 RecvTimeNs，构造紧凑 MarketTick
+  -> 构造紧凑 MarketTick
   -> LockFreeQueue<MarketTick> (SPSC)
   -> AsyncFileManager 处理线程 (安全校验 / UpdateTime 过滤 / 日期修正)
        -> CsvWriter
@@ -109,9 +109,9 @@ TradingDay 来自 TraderSpi 的登录结果。写盘前会覆盖行情原始 Tra
 
 ## 6. 数据列、清洗与类型精度
 
-### 6.1 44 列输出结构
+### 6.1 43 列输出结构
 
-CSV 与 Parquet 均输出 44 列：在原 43 个 CTP 行情字段（`TradingDay`, `InstrumentID`, `ExchangeID`, `LastPrice`, ..., `AveragePrice`, `ActionDay`）之后，新增第 44 列 **`RecvTimeNs`**（在 `OnRtnDepthMarketData` 入口采集的纳秒级 Unix Epoch 时间戳，Parquet 中类型为 `int64`）。
+CSV 与 Parquet 均输出完整的 **43** 个原始 CTP 行情字段（从 `TradingDay`、`InstrumentID`、`ExchangeID`、`LastPrice` 到 `AveragePrice`、`ActionDay` 结束）。
 
 ### 6.2 无效价格与精度处理
 

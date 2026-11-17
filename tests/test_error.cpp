@@ -296,10 +296,8 @@ TEST_CASE("MarketTick::from_ctp safely converts raw CTP market data", "[market_t
     raw.AskPrice5 = 100.6;
     raw.AskVolume5 = 25;
 
-    constexpr int64_t kRecvNs = 1700000000123456789LL;
-    const MarketTick tick = MarketTick::from_ctp(raw, kRecvNs);
+    const MarketTick tick = MarketTick::from_ctp(raw);
 
-    REQUIRE(tick.recv_time_ns == kRecvNs);
     REQUIRE(std::string_view(tick.trading_day) == "20250102");
     REQUIRE(std::string_view(tick.action_day) == "20250101");
     REQUIRE(std::string_view(tick.update_time) == "21:05:30");
@@ -330,10 +328,6 @@ TEST_CASE("MarketTick::from_ctp safely converts raw CTP market data", "[market_t
     REQUIRE(tick.ask_price == std::array<double, 5>{100.2, 100.3, 100.4, 100.5, 100.6});
     REQUIRE(tick.bid_volume == std::array<int32_t, 5>{11, 12, 13, 14, 15});
     REQUIRE(tick.ask_volume == std::array<int32_t, 5>{21, 22, 23, 24, 25});
-
-    REQUIRE(now_epoch_ns() > 0);
-    const MarketTick default_ts_tick = MarketTick::from_ctp(raw);
-    REQUIRE(default_ts_tick.recv_time_ns > 0);
 }
 
 TEST_CASE("FrontServer::clear_secrets scrubs password and auth_code", "[front_server][security]")

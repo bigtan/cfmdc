@@ -141,6 +141,9 @@ find_package(args CONFIG REQUIRED)
 if(CFMDC_ENABLE_PARQUET)
     find_package(Arrow CONFIG REQUIRED)
     find_package(Parquet CONFIG REQUIRED)
+    if(ARROW_MIMALLOC)
+        find_package(mimalloc CONFIG REQUIRED)
+    endif()
 endif()
 
 # 查找 CTP
@@ -180,6 +183,9 @@ if(CFMDC_ENABLE_PARQUET)
         Arrow::arrow_static
         Parquet::parquet_static
     )
+    if(ARROW_MIMALLOC)
+        target_link_libraries(cfmdc_storage PUBLIC mimalloc)
+    endif()
     if(MSVC)
         target_compile_definitions(cfmdc_storage PUBLIC ARROW_STATIC PARQUET_STATIC)
     endif()

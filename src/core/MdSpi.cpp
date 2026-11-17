@@ -3,6 +3,7 @@
 #include <chrono>
 #include <format>
 
+#include "cfmdc/types/MarketTick.h"
 #include "cfmdc/utils/Constants.h"
 
 namespace cfmdc
@@ -108,6 +109,7 @@ void MdSpi::set_trading_day_and_action_days(const std::string &trading_day, cons
     file_manager_.store(nullptr, std::memory_order_release);
     AsyncFileManager::Options file_manager_options;
     file_manager_options.worker_core = config_.worker_thread_core();
+    file_manager_options.parquet_worker_core = config_.parquet_worker_thread_core();
     if (use_parquet)
     {
         file_manager_options.parquet_row_group_size = config_.parquet_row_group_size();
@@ -173,9 +175,16 @@ void MdSpi::log_statistics() const
 
     const auto stats = file_manager->get_statistics();
     spdlog::info("Market data pipeline: stored={}, csv={}, parquet={}, ingress_queue={}, parquet_queue={}, dropped={}, "
-                 "write_failures={}, csv_flushes={}",
+                 "filtered={}, invalid={}, write_failures={}, csv_flushes={}",
                  stats.total_records, stats.csv_records, stats.parquet_records, stats.queue_size,
-                 stats.parquet_queue_size, stats.dropped_records, stats.write_failures, stats.periodic_flushes);
+                 stats.parquet_queue_size, stats.dropped_records, stats.filtered_records, stats.invalid_records,
+                 stats.write_failures, stats.periodic_flushes);
+    if (stats.total_records == 0 && stats.filtered_records > 0)
+    {
+        spdlog::warn("All {} received market data record(s) were filtered out by the UpdateTime policy; "
+                     "0 records stored",
+                     stats.filtered_records);
+    }
 }
 
 bool MdSpi::has_fatal_pipeline_error() const noexcept
@@ -317,7 +326,7 @@ void MdSpi::OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketDat
     {
         // High-performance lock-free/I/O-free hot path: overflow count is tracked atomically
         // in LockFreeQueue and warned from the main loop via check_pipeline_health().
-        (void)file_manager->write_market_data_async(*pDepthMarketData);
+        (void)file_manager->write_market_data_async(MarketTick::from_ctp(*pDepthMarketData));
     }
 }
 

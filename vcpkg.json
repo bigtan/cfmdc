@@ -1,6 +1,6 @@
 {
   "name": "cfmdc",
-  "version-string": "0.1.6",
+  "version-string": "0.1.7",
   "dependencies": [
     "args",
     "spdlog",

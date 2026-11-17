@@ -26,6 +26,9 @@ ParquetRowGroupSize = 100000
 InitTimeout = 60
 FlowPath = "./flow"
 SubList = "null"
+IncludeOptions = false
+WorkerThreadCore = "auto"
+ParquetWorkerThreadCore = "auto"
 ```
 
 ## 2. Front（前置服务器）
@@ -54,6 +57,20 @@ SubList = "null"
 - `UserProductInfo`
 - `AuthCode`
 - `AppID`
+
+### 2.3 环境变量凭据覆盖
+
+为避免在生产环境或容器中明文存放敏感凭据，以下环境变量（非空时）会覆盖所有 `Front` 项中对应的字段：
+
+| 环境变量 | 覆盖字段 |
+| --- | --- |
+| `CFMDC_BROKER_ID` | `Front.BrokerID` |
+| `CFMDC_USER_ID` | `Front.UserID` |
+| `CFMDC_PASSWORD` | `Front.Password` |
+| `CFMDC_AUTH_CODE` | `Front.AuthCode` |
+| `CFMDC_APP_ID` | `Front.AppID` |
+
+同时建议将 `config.toml` 文件权限限制为仅所有者可读写（`chmod 600`；通过 `cmake --install` 安装时会自动设置 `OWNER_READ OWNER_WRITE`）。
 
 ## 3. History（存储配置）
 
@@ -99,17 +116,41 @@ Parquet 每个 Row Group 的行数，默认 `100000`，有效范围 `1` 到 `100
 
 ### 4.2 FlowPath
 
-CTP 流文件路径，默认 `./flow`。若目录不存在会自动创建。
+CTP 流文件根目录，默认 `./flow`。程序会自动在其下创建并隔离 `<FlowPath>/td` 与 `<FlowPath>/md` 两个子目录，分别供交易查询与行情订阅会话使用。
 
 ### 4.3 SubList
 
 应用全局订阅合约列表，不属于单个 Front：
 
-- `"null"` 或省略：订阅全部期货合约
-- `"rb2505|IC2501"`：订阅指定合约（`|` 分隔）
+- `"null"` 或省略：订阅查询到的全部合约（受 `IncludeOptions` 约束）
+- `"rb2505|IC2501"`：仅订阅指定合约（`|` 分隔）
 
-旧版配置中的 `Front.SubList` 暂时仍可读取，但会产生迁移告警；新配置应统一使用
-`Application.SubList`。
+启动时程序会向 CTP 发起一次全市场 `ReqQryInstrument("")` 查询，然后在本地结合 `Application.SubList`、`Application.IncludeOptions` 以及合约 ID 安全校验进行过滤，避免逐个查询触及流控。
+
+旧版配置中的 `Front.SubList` 暂时仍可读取，但会产生迁移告警；新配置应统一使用 `Application.SubList`。
+
+### 4.4 IncludeOptions
+
+是否在本地合约过滤阶段保留期权合约（布尔值，默认 `false`）：
+
+- `false`（默认）：仅保留期货合约，忽略期权合约
+- `true`：同时保留期货与期权合约（CSV/Hybrid 模式下进程文件句柄上限 `FILE_HANDLE_LIMIT` 已提升至 `8192`）
+
+### 4.5 WorkerThreadCore
+
+`AsyncFileManager` 主清洗及 CSV 写入线程的 CPU 亲和性配置：
+
+- `-1`（默认）：不绑定核心，由操作系统调度
+- `"auto"`（内部哨兵 `-2`）：基于当前进程可用 CPU 集合（cpuset 感知）自动选择非 `0` 核心，避开常处理网络中断的核心 `0`
+- `0, 1...`：手动指定绑定核心编号
+
+### 4.6 ParquetWorkerThreadCore
+
+Parquet 独立压缩/写入线程的 CPU 亲和性配置：
+
+- 取值支持 `-1`、`"auto"` 或核心编号 `0, 1...`
+- **默认规则**：若未配置该字段，当 `WorkerThreadCore = "auto"` 时，默认也为 `-2`（`"auto"`）；否则默认 `-1`
+- 在 `"auto"` 模式下，会尽量为 Parquet 压缩线程分配与 `WorkerThreadCore` 不同的非 `0` 可用核心，避免压缩开销与主写入线程争抢 CPU
 
 ## 5. 版本与配置边界
 

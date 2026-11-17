@@ -3,6 +3,13 @@
 # Front server configuration
 # Support single server table or multiple server tables (array of tables)
 # When using multiple servers, the application will try them in order if connection fails
+#
+# Environment variable credential overrides (take precedence over TOML values when set):
+#   CFMDC_BROKER_ID -> Front.BrokerID
+#   CFMDC_USER_ID   -> Front.UserID
+#   CFMDC_PASSWORD  -> Front.Password
+#   CFMDC_AUTH_CODE -> Front.AuthCode
+#   CFMDC_APP_ID    -> Front.AppID
 
 # Example 1: Single server (backward compatible)
 # [Front]
@@ -56,17 +63,22 @@ ParquetRowGroupSize = 100000 # Lower values reduce flush tail latency; valid ran
 
 [Application]
 InitTimeout = 60 # Initialization timeout in seconds (default: 60)
-FlowPath = "./flow" # CTP API flow file directory (default: "./flow")
-SubList = "null" # Global instrument list: "null" = all, or "rb2505|IC2501"
+FlowPath = "./flow" # CTP API flow base directory; split internally into <FlowPath>/td and <FlowPath>/md
+SubList = "null" # Global instrument list: "null" = all queried contracts, or "rb2505|IC2501" (filtered locally from ReqQryInstrument(""))
+IncludeOptions = false # Include option contracts when filtering queried instruments (default: false = futures only)
 
 # Worker thread CPU affinity (Thread Pinning)
-# This settings binds the high-performance async writer thread to a specific CPU core.
 # Options:
-#   -1      : Disable affinity (let OS decide, default)
-#   "auto"  : Automatically select the last available core (skips core 0 to avoid interrupts)
+#   -1      : Disable affinity (let OS decide)
+#   "auto"  : Automatically select an available non-zero core (cpuset-aware; avoids core 0)
 #   0, 1... : Manually specify a core index
 #
 # Recommendations:
 #   - For VPS: Use "auto" to avoid core 0 which usually handles network interrupts.
 #   - For Physical Machines: Pin to a dedicated isolated core for lowest latency.
-WorkerThreadCore = "auto"
+WorkerThreadCore = "auto" # Async ingestion/CSV worker thread (default: -1)
+
+# Dedicated Parquet compression/writer thread CPU affinity
+# Options: -1, "auto", or a core index.
+# Default: "auto" (-2) when WorkerThreadCore = "auto" (selects a distinct non-zero core), otherwise -1.
+ParquetWorkerThreadCore = "auto"

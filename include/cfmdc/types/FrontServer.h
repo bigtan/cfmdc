@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <utility>
 
@@ -165,6 +166,24 @@ class FrontServer
     {
         return !md_url_.empty() && !td_url_.empty() && !broker_id_.empty() && !user_id_.empty() && !password_.empty() &&
                !user_product_info_.empty() && !auth_code_.empty() && !app_id_.empty();
+    }
+
+    /// @brief Scrub sensitive credentials from memory before clearing
+    void clear_secrets() noexcept
+    {
+        auto scrub = [](std::string &secret) noexcept {
+            if (!secret.empty())
+            {
+                volatile char *ptr = secret.data();
+                for (size_t i = 0; i < secret.size(); ++i)
+                {
+                    ptr[i] = '\0';
+                }
+            }
+            secret.clear();
+        };
+        scrub(password_);
+        scrub(auth_code_);
     }
 
   private:

@@ -152,7 +152,9 @@ template <typename T, size_t Size> class LockFreeQueue
     // Producer-owned cache line
     alignas(kCacheLineSize) std::atomic<size_t> tail_{0};
     size_t head_cache_{0};
-    std::atomic<size_t> overflow_count_{0};
+
+    // Overflow counter on a dedicated cache line to avoid false sharing with producer tail_/head_cache_
+    alignas(kCacheLineSize) std::atomic<size_t> overflow_count_{0};
 
     alignas(kCacheLineSize) T buffer_[Size];
 };

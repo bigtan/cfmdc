@@ -1,7 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <string>
+#include <string_view>
 
 namespace cfmdc::market_data_time
 {
@@ -36,19 +37,9 @@ constexpr PackedTime pack_hhmmss_unchecked(const char *time_str) noexcept
            static_cast<uint64_t>(static_cast<unsigned char>(time_str[7]));
 }
 
-inline bool parse_hhmmss(const char *time_str, PackedTime &packed_time) noexcept
+constexpr bool parse_hhmmss(std::string_view time_str, PackedTime &packed_time) noexcept
 {
-    if (!time_str)
-    {
-        return false;
-    }
-
-    size_t len = 0;
-    while (len < 9 && time_str[len] != '\0')
-    {
-        ++len;
-    }
-    if (len != 8 || time_str[2] != ':' || time_str[5] != ':')
+    if (time_str.size() != 8 || time_str[2] != ':' || time_str[5] != ':')
     {
         return false;
     }
@@ -67,11 +58,37 @@ inline bool parse_hhmmss(const char *time_str, PackedTime &packed_time) noexcept
         return false;
     }
 
-    packed_time = pack_hhmmss_unchecked(time_str);
+    packed_time = pack_hhmmss_unchecked(time_str.data());
     return true;
 }
 
+inline bool parse_hhmmss(const char *time_str, PackedTime &packed_time) noexcept
+{
+    if (!time_str)
+    {
+        return false;
+    }
+
+    size_t len = 0;
+    while (len < 9 && time_str[len] != '\0')
+    {
+        ++len;
+    }
+    if (len != 8)
+    {
+        return false;
+    }
+
+    return parse_hhmmss(std::string_view(time_str, len), packed_time);
+}
+
 } // namespace detail
+
+constexpr bool is_valid_hhmmss(std::string_view time_str) noexcept
+{
+    detail::PackedTime ignored = 0;
+    return detail::parse_hhmmss(time_str, ignored);
+}
 
 inline bool is_valid_hhmmss(const char *time_str) noexcept
 {
@@ -120,10 +137,10 @@ inline const char *to_string(StartupWindow window) noexcept
     }
 }
 
-inline StartupWindow classify_startup_window(const std::string &startup_time_hms) noexcept
+constexpr StartupWindow classify_startup_window(std::string_view startup_time_hms) noexcept
 {
     detail::PackedTime startup_time = 0;
-    if (!detail::parse_hhmmss(startup_time_hms.c_str(), startup_time))
+    if (!detail::parse_hhmmss(startup_time_hms, startup_time))
     {
         return StartupWindow::Night;
     }
@@ -139,6 +156,48 @@ inline StartupWindow classify_startup_window(const std::string &startup_time_hms
     }
 
     return StartupWindow::Night;
+}
+
+inline StartupWindow classify_startup_window(const char *startup_time_hms) noexcept
+{
+    detail::PackedTime startup_time = 0;
+    if (!detail::parse_hhmmss(startup_time_hms, startup_time))
+    {
+        return StartupWindow::Night;
+    }
+
+    if (startup_time < kStartupCutoff0700Packed)
+    {
+        return StartupWindow::Pre0700;
+    }
+
+    if (startup_time <= kStartupCutoff1700Packed)
+    {
+        return StartupWindow::Day;
+    }
+
+    return StartupWindow::Night;
+}
+
+constexpr bool should_store_by_update_time(StartupWindow startup_window, std::string_view update_time) noexcept
+{
+    detail::PackedTime update = 0;
+    if (!detail::parse_hhmmss(update_time, update))
+    {
+        return false;
+    }
+
+    switch (startup_window)
+    {
+    case StartupWindow::Pre0700:
+        return kKeepPre0700.contains(update);
+    case StartupWindow::Day:
+        return kKeepDay.contains(update);
+    case StartupWindow::Night:
+        return kKeepNight1.contains(update) || kKeepNight2.contains(update);
+    default:
+        return false;
+    }
 }
 
 inline bool should_store_by_update_time(StartupWindow startup_window, const char *update_time) noexcept
@@ -160,6 +219,12 @@ inline bool should_store_by_update_time(StartupWindow startup_window, const char
     default:
         return false;
     }
+}
+
+constexpr bool should_use_next_action_day(std::string_view update_time) noexcept
+{
+    detail::PackedTime update = 0;
+    return detail::parse_hhmmss(update_time, update) && update <= kActionDayCutoffPacked;
 }
 
 inline bool should_use_next_action_day(const char *update_time) noexcept

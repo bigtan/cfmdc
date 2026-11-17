@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <thread>
 
+#include "cfmdc/types/MarketTick.h"
 #include "cfmdc/utils/LockFreeQueue.h"
 
 using namespace cfmdc;
@@ -51,6 +52,13 @@ TEST_CASE("LockFreeQueue basic operations", "[lockfreequeue]")
         REQUIRE(queue.size() == queue.capacity());
         REQUIRE_FALSE(queue.try_enqueue(999)); // Should fail when full
         REQUIRE(queue.overflow_count() == 1);
+        queue.reset_overflow_count();
+        REQUIRE(queue.overflow_count() == 0);
+    }
+
+    SECTION("Overflow counter is separated onto its own cache line")
+    {
+        REQUIRE(sizeof(LockFreeQueue<int, 8>) >= 512);
     }
 
     SECTION("Queue empty")
@@ -196,4 +204,33 @@ TEST_CASE("LockFreeQueue performance characteristics", "[lockfreequeue][benchmar
         REQUIRE(queue.empty());
         REQUIRE(seconds > 0.0);
     }
+}
+
+TEST_CASE("LockFreeQueue supports MarketTick round-trip", "[lockfreequeue][market_tick]")
+{
+    LockFreeQueue<MarketTick, 16> queue;
+
+    CThostFtdcDepthMarketDataField raw{};
+    safe_strcpy(raw.InstrumentID, "rb2505");
+    safe_strcpy(raw.UpdateTime, "09:30:00");
+    raw.LastPrice = 3500.5;
+    raw.Volume = 123;
+
+    const MarketTick tick = MarketTick::from_ctp(raw, 987654321LL);
+    REQUIRE(queue.try_enqueue(tick));
+
+    MarketTick *front = queue.front();
+    REQUIRE(front != nullptr);
+    REQUIRE(front->recv_time_ns == 987654321LL);
+    REQUIRE(std::string(front->instrument_id) == "rb2505");
+    REQUIRE(front->last_price == 3500.5);
+    REQUIRE(front->volume == 123);
+    queue.pop();
+    REQUIRE(queue.empty());
+
+    REQUIRE(queue.try_enqueue(MarketTick::from_ctp(raw, 111222333LL)));
+    MarketTick out{};
+    REQUIRE(queue.try_dequeue(out));
+    REQUIRE(out.recv_time_ns == 111222333LL);
+    REQUIRE(std::string(out.instrument_id) == "rb2505");
 }

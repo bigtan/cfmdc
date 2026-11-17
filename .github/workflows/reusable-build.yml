@@ -156,9 +156,7 @@ jobs:
       - name: Restore vcpkg cache
         uses: actions/cache@v6
         with:
-          path: |
-            ${{ github.workspace }}/build/vcpkg_installed
-            ${{ matrix.vcpkg_cache_path }}
+          path: ${{ matrix.vcpkg_cache_path }}
           key: ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.triplet }}-vcpkg-

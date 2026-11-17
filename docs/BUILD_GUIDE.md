@@ -10,7 +10,9 @@
 ## 2. vcpkg 准备
 
 项目使用 vcpkg manifest 模式（`vcpkg.json`），依赖包含：
-`spdlog`, `tomlplusplus`, `Taywee/args`, `arrow`, `parquet`, `catch2`。
+`args`, `spdlog`, `tomlplusplus`, `catch2`，以及可选 `parquet` 特性依赖 `arrow`（含 `parquet`、`filesystem`）。
+
+> 说明：在 Windows `x64-windows-static`（`staticcrt`）下，`vcpkg.json` 自动禁用 `arrow` 的 `mimalloc` 特性；CMake 中已移除对 `mimalloc` 的显式 `find_package` 与链接，`Arrow::arrow_static` 会自行管理其传递分配器依赖，从而避免 Windows 静态构建时的 `mimalloc` 查找失败问题。
 
 ### Windows
 
@@ -32,12 +34,15 @@ export VCPKG_ROOT=~/vcpkg
 
 ## 3. 构建步骤
 
-### Windows (Ninja)
+### Windows (Ninja + clang-cl / MSVC)
 
 ```powershell
 cmake -S . -B build -G Ninja `
   -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+  -DCMAKE_C_COMPILER=clang-cl `
+  -DCMAKE_CXX_COMPILER=clang-cl `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
 cmake --build build
 ```
@@ -52,8 +57,11 @@ cmake -S . -B build -G Ninja \
 cmake --build build
 ```
 
-构建产物位于 `build/bin/cfmdc`，CTP 运行时库会被自动拷贝到相同目录。
+在 Linux 下，仅当 `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` 与环境变量 `CC`/`CXX` 均未指定时，CMake 才会默认选择 `clang`/`clang++`（不使用 `FORCE` 覆盖）；如需使用 GCC，可通过 `CC=gcc CXX=g++` 或 `-DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++` 指定。
+
+构建产物位于 `build/bin/cfmdc`（Windows 为 `build\bin\cfmdc.exe`），CTP 运行时库会被自动拷贝到相同目录。
 测试二进制默认也位于 `build/bin/cfmdc_tests`。
+CMake 目标拆分为 `cfmdc_storage`（存储静态库）与 `cfmdc_core`（核心静态库），主程序 `cfmdc` 与测试 `cfmdc_tests` 共用静态库，避免重复编译实现文件。
 
 ## 4. 关键选项
 
@@ -98,6 +106,8 @@ vcpkg 也不会安装 Arrow/Parquet 依赖。
 ```bash
 cmake --install build
 ```
+
+安装会将可执行文件放入 `bin/cfmdc`，并将 `config.toml.example` 复制为 `etc/cfmdc/config.toml`（权限限制为 `OWNER_READ OWNER_WRITE` / `0600`）。
 
 ## 7. 测试
 

@@ -8,12 +8,13 @@ Current project version: `0.1.5`.
 
 ## Highlights
 
-- Multi-front retry for both Trader and Market Data sessions
-- Async file pipeline with lock-free SPSC queue
-- CSV / Parquet / Hybrid storage modes
-- TradingDay and ActionDay correction based on startup window
-- Time-window filtering by UpdateTime to keep expected sessions only
-- Modern CMake + vcpkg manifest workflow
+- Multi-front retry for Trader and Market Data sessions, with split `flow/td` & `flow/md` directories and immediate `TraderSpi` teardown after startup query to release the TD session slot
+- Single-shot full-market `ReqQryInstrument("")` with local filtering (`SubList`, `IncludeOptions`) and instrument ID safety validation
+- Environment variable credential overrides (`CFMDC_BROKER_ID`, `CFMDC_USER_ID`, `CFMDC_PASSWORD`, `CFMDC_AUTH_CODE`, `CFMDC_APP_ID`)
+- Async storage pipeline with compact `MarketTick` snapshots, lock-free SPSC queues, and cpuset-aware thread affinity (`WorkerThreadCore`, `ParquetWorkerThreadCore`)
+- CSV / Parquet / Hybrid storage modes with 44 columns (including `RecvTimeNs`), empty CSV / Parquet `NULL` for invalid CTP prices, preserved `0.0`, and full-precision decimal `Turnover`
+- Fixed `UTC+8` (`Asia/Shanghai`) startup window and `ActionDay` calculation (safe in UTC Docker containers without `TZ`)
+- Modern CMake (`cfmdc_storage` / `cfmdc_core` static targets) + vcpkg manifest workflow
 
 ## Quick Start
 
@@ -34,7 +35,10 @@ $env:VCPKG_ROOT = "C:\vcpkg"
 
 cmake -S . -B build -G Ninja `
   -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+  -DCMAKE_C_COMPILER=clang-cl `
+  -DCMAKE_CXX_COMPILER=clang-cl `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
 cmake --build build
 ```
@@ -61,7 +65,12 @@ cmake --build build
   The packaged binary is also checked in a clean Debian 13 container before upload.
   Run these archives on Debian 13 amd64 with `libstdc++6` and `libgcc-s1`
   installed; keep the bundled CTP `.so` files beside `cfmdc`.
-- Output binary: `build/bin/cfmdc`
+- On Linux, CMake only defaults to `clang`/`clang++` if `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER`
+  and `CC`/`CXX` are unset, without forcing overrides.
+- On Windows (`x64-windows-static`), `vcpkg.json` builds Arrow without `mimalloc`,
+  and CMake no longer explicitly finds or links `mimalloc` (`Arrow::arrow_static`
+  manages its own transitive allocator dependencies).
+- Output binary: `build/bin/cfmdc` (`build\bin\cfmdc.exe` on Windows)
 - Default build enables x86-64-v3 (AVX2). Disable if you need older CPUs:
   `-DCFMDC_ENABLE_ARCH_V3=OFF`
 - Disable Parquet if Arrow is not available: `-DCFMDC_ENABLE_PARQUET=OFF`
@@ -104,12 +113,18 @@ ParquetRowGroupSize = 100000
 
 [Application]
 InitTimeout = 60
-FlowPath = "./flow"
-SubList = "null" # "null" = all, or "rb2505|IC2501"
+FlowPath = "./flow" # Splits internally into <FlowPath>/td and <FlowPath>/md
+SubList = "null" # "null" = all queried contracts, or "rb2505|IC2501"
+IncludeOptions = false # Set true to include options alongside futures
+WorkerThreadCore = "auto" # -1, "auto", or core index (default: -1)
+ParquetWorkerThreadCore = "auto" # Defaults to "auto" (-2) if WorkerThreadCore="auto", else -1
 ```
 
 Placeholders supported in `CSVPath` and `ParquetPath`:
 `{tradingday}`, `{year}`, `{month}`, `{day}`.
+
+Environment variable credential overrides (take precedence over `Front` fields when set):
+`CFMDC_BROKER_ID`, `CFMDC_USER_ID`, `CFMDC_PASSWORD`, `CFMDC_AUTH_CODE`, `CFMDC_APP_ID`.
 
 ## Run
 
@@ -133,25 +148,45 @@ Version metadata is managed from a single source in `CMakeLists.txt` via
 - The application is designed to run for a single trading session: start it
   before the session begins and restart it for the next one (TradingDay and
   storage paths are fixed at startup).
+- Startup session window and `ActionDay` calculations use fixed `UTC+8`
+  (`Asia/Shanghai`) calendar math independent of host timezone, making UTC
+  Docker containers safe without setting `TZ`.
+- `FlowPath` is split into `<FlowPath>/td` and `<FlowPath>/md`, and `TraderSpi`
+  is torn down immediately after the startup instrument query to release the TD
+  session slot.
 - Front server retry walks the configured server list once. Run cfmdc under a
   process supervisor (systemd `Restart=on-failure`, NSSM, etc.) for automatic
   recovery after a failed start or a crash.
 - `config.toml` contains account credentials. It is excluded from version
-  control via `.gitignore`; also restrict file permissions (e.g. `chmod 600`).
-- Pipeline statistics (stored/queued/dropped records, write failures) are
-  logged once per minute; non-zero `dropped` or `write_failures` values need
-  investigation.
+  control via `.gitignore`; restrict file permissions (e.g. `chmod 600` —
+  `cmake --install` installs `config.toml` with owner-only read/write
+  permissions), or supply credentials via `CFMDC_*` environment variables.
+- CSV/Hybrid modes raise the process file handle limit (`FILE_HANDLE_LIMIT = 8192`).
+- Pipeline statistics (`stored`, `csv`, `parquet`, `ingress_queue`,
+  `parquet_queue`, `filtered`, `invalid`, `dropped`, `write_failures`,
+  `csv_flushes`) are logged once per minute; non-zero `invalid`, `dropped`, or
+  `write_failures` values need investigation (`filtered` tracks expected
+  outside-window ticks).
 - Logs are written to the console and to `logs/cfmdc_YYYY-MM-DD.log` (daily
   files, rotated at 06:00 so a night session stays in one file, 30 days kept).
 
-## Storage Behavior (Current)
+## Storage Behavior
 
 - CSV: one file per instrument, named `{InstrumentID}_{TradingDay}.csv`
 - Parquet: single timestamped file per run in `ParquetPath`
+- 44 columns: the 43 CTP market data fields plus `RecvTimeNs` (nanosecond epoch
+  timestamp captured in `OnRtnDepthMarketData`) as the 44th column
+- Invalid CTP prices (`DBL_MAX`, `-DBL_MAX`, `NaN`, `±Inf`) are written as empty
+  fields in CSV and `NULL` in Parquet, while genuine `0.0` (and valid negative
+  spread prices) are preserved; `Turnover` retains full decimal precision in CSV
 - TradingDay is taken from Trader SPI and applied to all stored ticks
-- UpdateTime filtering and ActionDay correction happen in the async worker
-- Parquet uses a dedicated writer queue/thread so compression does not block CSV or ingestion processing
-- Parquet uses zstd level 3; `History.ParquetRowGroupSize` controls the throughput/tail-latency tradeoff
+- UpdateTime filtering, safety validation, and ActionDay correction happen in
+  the async worker over compact `MarketTick` records
+- Parquet uses a dedicated writer queue/thread so compression does not block CSV
+  or ingestion processing (`ParquetWorkerThreadCore` defaults to `-2`/`"auto"`
+  when `WorkerThreadCore = "auto"`, otherwise `-1`)
+- Parquet uses zstd level 3; `History.ParquetRowGroupSize` controls the
+  throughput/tail-latency tradeoff
 
 ## Tests
 

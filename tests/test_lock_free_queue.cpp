@@ -216,21 +216,21 @@ TEST_CASE("LockFreeQueue supports MarketTick round-trip", "[lockfreequeue][marke
     raw.LastPrice = 3500.5;
     raw.Volume = 123;
 
-    const MarketTick tick = MarketTick::from_ctp(raw, 987654321LL);
+    const MarketTick tick = MarketTick::from_ctp(raw);
     REQUIRE(queue.try_enqueue(tick));
 
     MarketTick *front = queue.front();
     REQUIRE(front != nullptr);
-    REQUIRE(front->recv_time_ns == 987654321LL);
     REQUIRE(std::string(front->instrument_id) == "rb2505");
     REQUIRE(front->last_price == 3500.5);
     REQUIRE(front->volume == 123);
     queue.pop();
     REQUIRE(queue.empty());
 
-    REQUIRE(queue.try_enqueue(MarketTick::from_ctp(raw, 111222333LL)));
+    raw.Volume = 456;
+    REQUIRE(queue.try_enqueue(MarketTick::from_ctp(raw)));
     MarketTick out{};
     REQUIRE(queue.try_dequeue(out));
-    REQUIRE(out.recv_time_ns == 111222333LL);
+    REQUIRE(out.volume == 456);
     REQUIRE(std::string(out.instrument_id) == "rb2505");
 }

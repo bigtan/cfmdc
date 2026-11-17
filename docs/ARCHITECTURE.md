@@ -11,7 +11,7 @@ CFMDC 是面向期货行情的高性能采集器，使用 CTP 行情与交易接
 
 - `Application`: 生命周期管理、信号处理、初始化流程、流目录拆分、合约过滤与订阅流程
 - `TraderSpi`: 认证、登录、结算确认、全市场合约查询（完成后立即释放以归还 TD 会话槽位）
-- `MdSpi`: 行情登录、订阅、行情回调与 `RecvTimeNs` 采集
+- `MdSpi`: 行情登录、订阅、行情回调
 
 ### Config
 
@@ -20,8 +20,8 @@ CFMDC 是面向期货行情的高性能采集器，使用 CTP 行情与交易接
 ### Utils
 
 - `AsyncFileManager`: 异步写入管线（无锁队列 + 后台处理/压缩线程 + 统计计数）
-- `CsvWriter`: CSV 写入（每合约一文件，44 列格式，空值表示无效 CTP 价格）
-- `ParquetBatchWriter`: Parquet 写入（每次运行一个文件，44 列 Schema，`NULL` 表示无效 CTP 价格）
+- `CsvWriter`: CSV 写入（每合约一文件，43 列 CTP 格式，空值表示无效 CTP 价格）
+- `ParquetBatchWriter`: Parquet 写入（每次运行一个文件，43 列 CTP Schema，`NULL` 表示无效 CTP 价格）
 - `LockFreeQueue`: SPSC 无锁队列（`overflow_count_` 独立缓存行对齐，避免伪共享）
 - `MarketDataTimePolicy`: UpdateTime 过滤与 ActionDay 规则
 - `TimeUtils`: 固定 `UTC+8`（`Asia/Shanghai`）纯整数历法时间辅助函数（不依赖宿主机 `TZ`）
@@ -29,7 +29,7 @@ CFMDC 是面向期货行情的高性能采集器，使用 CTP 行情与交易接
 
 ### Types
 
-- `MarketTick`: 紧凑且可平凡复制的行情快照结构体（包含 `recv_time_ns`）
+- `MarketTick`: 紧凑且可平凡复制的 43 字段行情快照结构体
 - `FrontServer`: 前置配置与连接凭据封装（支持 `clear_secrets()` 内存擦除）
 - `StorageMode`: CSV / Parquet / Hybrid 存储模式枚举
 
@@ -50,16 +50,16 @@ CTP 行情推送
    │
    ▼
 MdSpi::OnRtnDepthMarketData
-   │  (采集 RecvTimeNs，转为紧凑 MarketTick，仅入队，无锁)
+   │  (转为紧凑 MarketTick，仅入队，无锁)
    ▼
 LockFreeQueue<MarketTick> (SPSC)
    │
    ▼
 AsyncFileManager::worker_loop
    │  (安全校验[invalid]、过滤 UpdateTime[filtered]、修正 TradingDay/ActionDay)
-   ├──────────────► CsvWriter ──────────────► 磁盘 (44 列，无效价格为空，全精度 Turnover)
+   ├──────────────► CsvWriter ──────────────► 磁盘 (43 列，无效价格为空，全精度 Turnover)
    │
-   └► ParquetQueue ─► Parquet writer thread ─► 磁盘 (44 列，无效价格为 NULL)
+   └► ParquetQueue ─► Parquet writer thread ─► 磁盘 (43 列，无效价格为 NULL)
 ```
 
 ## 5. 时间与交易日策略
@@ -101,7 +101,7 @@ AsyncFileManager::worker_loop
 
 ## 6. 并发与性能
 
-- 行情回调线程仅记录 `RecvTimeNs` 并构造紧凑的 `MarketTick` 入队，无锁且不直接拷贝冗余 CTP 字段
+- 行情回调线程仅构造紧凑的 `MarketTick` 入队，无锁且不直接拷贝冗余 CTP 字段
 - `LockFreeQueue` 将 `overflow_count_` 放在独立缓存行（`alignas(kCacheLineSize)`），避免与生产者 `tail_`/`head_cache_` 发生伪共享
 - 异步处理线程批量出队并执行校验、过滤与 CSV 写盘
 - Parquet 使用独立 `MarketTick` SPSC 队列和写线程，隔离 Row Group 构建及压缩暂停

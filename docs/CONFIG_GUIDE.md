@@ -20,7 +20,7 @@ AppID = "your_app_id"
 StorageMode = "Parquet"
 CSVPath = "./data/csv/{tradingday}"
 ParquetPath = "./data/parquet/{tradingday}"
-ParquetRowGroupSize = 100000
+ParquetRowGroupSize = 200000
 
 [Application]
 InitTimeout = 60
@@ -105,7 +105,7 @@ ParquetPath = "./data/{year}/{month}/parquet/{tradingday}"
 
 ### 3.3 ParquetRowGroupSize
 
-Parquet 每个 Row Group 的行数，默认 `100000`，有效范围 `1` 到 `1000000`。
+Parquet 每个 Row Group 的行数，默认 `200000`，有效范围 `1` 到 `1000000`。
 较小的值可缩短单次构建和压缩造成的尾延迟，较大的值通常有利于压缩率和批量吞吐。
 
 ## 4. Application（应用配置）

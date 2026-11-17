@@ -759,6 +759,7 @@ ParquetPath = "./data/parquet"
         REQUIRE(config.worker_thread_core() == -1);
         REQUIRE(config.parquet_worker_thread_core() == -1);
         REQUIRE(config.include_options() == false);
+        REQUIRE(config.parquet_row_group_size() == 200000);
     }
 
     SECTION("Application options are read when explicitly configured")

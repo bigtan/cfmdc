@@ -34,7 +34,7 @@ class AsyncFileManager
         int worker_core{-1};
         int parquet_worker_core{-1};
         std::chrono::milliseconds csv_flush_interval{std::chrono::seconds(5)};
-        size_t parquet_row_group_size{100000};
+        size_t parquet_row_group_size{200000};
     };
 
     /// @brief Constructor

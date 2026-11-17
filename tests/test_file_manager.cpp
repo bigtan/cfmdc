@@ -16,6 +16,8 @@
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
 #endif
 
 #include "cfmdc/utils/Error.h"
@@ -453,40 +455,137 @@ TEST_CASE("ParquetBatchWriter validates trading day and writes nullable 43-colum
 
     REQUIRE(trading_day->GetString(0) == "20250102");
     REQUIRE(trading_day->GetString(1) == "20250102");
-    REQUIRE(instrument_id->GetString(0) == "rb2505");
-    REQUIRE(instrument_id->GetString(1) == "ag2506");
-    REQUIRE(action_day->GetString(0) == "20250101"); // 21:30:00 -> base_action_day
-    REQUIRE(action_day->GetString(1) == "20250102"); // 01:15:00 <= 07:00:00 -> next_action_day
+    // Sorted by InstrumentID within the row group: "ag2506" precedes "rb2505".
+    REQUIRE(instrument_id->GetString(0) == "ag2506");
+    REQUIRE(instrument_id->GetString(1) == "rb2505");
+    REQUIRE(action_day->GetString(0) == "20250102"); // 01:15:00 <= 07:00:00 -> next_action_day
+    REQUIRE(action_day->GetString(1) == "20250101"); // 21:30:00 -> base_action_day
 
-    REQUIRE(last_price->IsNull(0));
-    REQUIRE_FALSE(last_price->IsNull(1));
-    REQUIRE(last_price->Value(1) == 0.0);
+    REQUIRE_FALSE(last_price->IsNull(0));
+    REQUIRE(last_price->Value(0) == 0.0);
+    REQUIRE(last_price->IsNull(1));
 
     REQUIRE_FALSE(open_price->IsNull(0));
-    REQUIRE(open_price->Value(0) == 0.0);
+    REQUIRE(open_price->Value(0) == 5200.5);
     REQUIRE_FALSE(open_price->IsNull(1));
-    REQUIRE(open_price->Value(1) == 5200.5);
+    REQUIRE(open_price->Value(1) == 0.0);
 
-    REQUIRE(pre_oi->IsNull(0));
+    REQUIRE(pre_oi->IsNull(1));
 
     REQUIRE_FALSE(turnover->IsNull(0));
-    REQUIRE(turnover->Value(0) == 123456.78);
+    REQUIRE(turnover->Value(0) == 987654.321);
     REQUIRE_FALSE(turnover->IsNull(1));
-    REQUIRE(turnover->Value(1) == 987654.321);
+    REQUIRE(turnover->Value(1) == 123456.78);
 
-    REQUIRE_FALSE(open_interest->IsNull(0));
-    REQUIRE(open_interest->Value(0) == 0.0);
+    REQUIRE_FALSE(open_interest->IsNull(1));
+    REQUIRE(open_interest->Value(1) == 0.0);
 
-    REQUIRE(bid_price1->IsNull(0));
-    REQUIRE_FALSE(bid_price1->IsNull(1));
-    REQUIRE(bid_price1->Value(1) == -12.5);
+    REQUIRE_FALSE(bid_price1->IsNull(0));
+    REQUIRE(bid_price1->Value(0) == -12.5);
+    REQUIRE(bid_price1->IsNull(1));
 
-    REQUIRE_FALSE(ask_price1->IsNull(0));
-    REQUIRE(ask_price1->Value(0) == 0.0);
-    REQUIRE(ask_price1->IsNull(1));
+    REQUIRE(ask_price1->IsNull(0));
+    REQUIRE_FALSE(ask_price1->IsNull(1));
+    REQUIRE(ask_price1->Value(1) == 0.0);
 
-    REQUIRE(avg_price->IsNull(0));
-    REQUIRE_FALSE(avg_price->IsNull(1));
-    REQUIRE(avg_price->Value(1) == 0.0);
+    REQUIRE_FALSE(avg_price->IsNull(0));
+    REQUIRE(avg_price->Value(0) == 0.0);
+    REQUIRE(avg_price->IsNull(1));
+}
+
+TEST_CASE("ParquetMarketDataWriter sorts row group stably by InstrumentID and uses BYTE_STREAM_SPLIT for doubles",
+          "[file_manager][parquet][sort]")
+{
+    TempDir tmp("cfmdc_parquet_sort_bss");
+    const auto parquet_dir = tmp.path() / "parquet";
+
+    {
+        AsyncFileManager::Options options;
+        options.parquet_row_group_size = 64;
+        auto manager = std::make_unique<AsyncFileManager>(std::filesystem::path{}, parquet_dir, "20250102", "20250101",
+                                                          "20250102", "09:00:00", StorageMode::PARQUET, options);
+
+        auto t1 = make_tick("rb2505", "09:30:00");
+        t1.last_price = 3501.0;
+        t1.volume = 1;
+
+        auto t2 = make_tick("ag2506", "09:30:00");
+        t2.last_price = 7100.0;
+        t2.volume = 2;
+
+        auto t3 = make_tick("rb2505", "09:30:01");
+        t3.last_price = 3502.0;
+        t3.volume = 3;
+
+        auto t4 = make_tick("IF2506", "09:30:01");
+        t4.last_price = INVALID_PRICE;
+        t4.volume = 4;
+
+        auto t5 = make_tick("ag2506", "09:30:02");
+        t5.last_price = 7105.0;
+        t5.volume = 5;
+
+        for (const auto &t : {t1, t2, t3, t4, t5})
+        {
+            REQUIRE(manager->write_market_data_async(t));
+        }
+
+        manager->stop();
+        REQUIRE(manager->flush_all());
+        REQUIRE(manager->close_all());
+        REQUIRE_FALSE(manager->has_fatal_error());
+    }
+
+    std::filesystem::path parquet_file;
+    for (const auto &entry : std::filesystem::directory_iterator(parquet_dir))
+    {
+        if (entry.path().extension() == ".parquet")
+        {
+            parquet_file = entry.path();
+            break;
+        }
+    }
+    REQUIRE_FALSE(parquet_file.empty());
+
+    auto infile_result = arrow::io::ReadableFile::Open(parquet_file.string());
+    REQUIRE(infile_result.ok());
+    auto reader_result = parquet::arrow::OpenFile(*infile_result, arrow::default_memory_pool());
+    REQUIRE(reader_result.ok());
+
+    auto metadata = (*reader_result)->parquet_reader()->metadata();
+    REQUIRE(metadata->num_row_groups() == 1);
+    const auto last_price_encodings = metadata->RowGroup(0)->ColumnChunk(3)->encodings();
+    REQUIRE(std::find(last_price_encodings.begin(), last_price_encodings.end(),
+                      parquet::Encoding::BYTE_STREAM_SPLIT) != last_price_encodings.end());
+
+    auto table_result = (*reader_result)->ReadTable();
+    REQUIRE(table_result.ok());
+    std::shared_ptr<arrow::Table> table = *table_result;
+    REQUIRE(table->num_rows() == 5);
+
+    auto inst = std::static_pointer_cast<arrow::StringArray>(table->GetColumnByName("InstrumentID")->chunk(0));
+    auto lp = std::static_pointer_cast<arrow::DoubleArray>(table->GetColumnByName("LastPrice")->chunk(0));
+    auto vol = std::static_pointer_cast<arrow::Int32Array>(table->GetColumnByName("Volume")->chunk(0));
+
+    // ASCII lexicographical order: "IF2506" < "ag2506" < "rb2505", with intra-instrument order preserved.
+    REQUIRE(inst->GetString(0) == "IF2506");
+    REQUIRE(lp->IsNull(0));
+    REQUIRE(vol->Value(0) == 4);
+
+    REQUIRE(inst->GetString(1) == "ag2506");
+    REQUIRE(lp->Value(1) == 7100.0);
+    REQUIRE(vol->Value(1) == 2);
+
+    REQUIRE(inst->GetString(2) == "ag2506");
+    REQUIRE(lp->Value(2) == 7105.0);
+    REQUIRE(vol->Value(2) == 5);
+
+    REQUIRE(inst->GetString(3) == "rb2505");
+    REQUIRE(lp->Value(3) == 3501.0);
+    REQUIRE(vol->Value(3) == 1);
+
+    REQUIRE(inst->GetString(4) == "rb2505");
+    REQUIRE(lp->Value(4) == 3502.0);
+    REQUIRE(vol->Value(4) == 3);
 }
 #endif

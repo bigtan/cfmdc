@@ -146,7 +146,7 @@ StorageMode parse_storage_mode(const toml::table &history_table)
 
 size_t parse_parquet_row_group_size(const toml::table &history_table)
 {
-    constexpr int64_t kDefaultRowGroupSize = 100000;
+    constexpr int64_t kDefaultRowGroupSize = 200000;
     constexpr int64_t kMaxRowGroupSize = 1000000;
 
     if (!history_table.contains("ParquetRowGroupSize"))

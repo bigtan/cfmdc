@@ -109,7 +109,7 @@ AppID = "your_app_id"
 StorageMode = "Parquet"
 CSVPath = "./data/csv/{tradingday}"
 ParquetPath = "./data/parquet/{tradingday}"
-ParquetRowGroupSize = 100000
+ParquetRowGroupSize = 200000
 
 [Application]
 InitTimeout = 60
@@ -185,7 +185,9 @@ Version metadata is managed from a single source in `CMakeLists.txt` via
 - Parquet uses a dedicated writer queue/thread so compression does not block CSV
   or ingestion processing (`ParquetWorkerThreadCore` defaults to `-2`/`"auto"`
   when `WorkerThreadCore = "auto"`, otherwise `-1`)
-- Parquet uses zstd level 3; `History.ParquetRowGroupSize` controls the
+- Parquet uses zstd level 3, sorts each row group by `InstrumentID` (preserving
+  per-instrument order), and applies `BYTE_STREAM_SPLIT` on float64 columns;
+  `History.ParquetRowGroupSize` (default `200000`) controls the
   throughput/tail-latency tradeoff
 
 ## Tests

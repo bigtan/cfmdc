@@ -95,7 +95,7 @@ class Config
     }
 
     /// @brief Get Parquet row-group size
-    /// @return Rows per group (default: 100000)
+    /// @return Rows per group (default: 200000)
     size_t parquet_row_group_size() const noexcept
     {
         return parquet_row_group_size_;
@@ -114,7 +114,7 @@ class Config
     int parquet_worker_thread_core_{-1};
     bool include_options_{false};
     StorageMode storage_mode_{StorageMode::CSV};
-    size_t parquet_row_group_size_{100000};
+    size_t parquet_row_group_size_{200000};
 };
 
 } // namespace cfmdc

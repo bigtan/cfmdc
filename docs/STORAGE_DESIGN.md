@@ -125,7 +125,8 @@ CSV 与 Parquet 均输出完整的 **43** 个原始 CTP 行情字段（从 `Trad
 
 - `compression`: `zstd`
 - `compression_level`: `3`
-- `row_group_size`: 由 `History.ParquetRowGroupSize` 配置，默认 `100000`
+- `row_group_size`: 由 `History.ParquetRowGroupSize` 配置，默认 `200000`
+- 行组内按 `InstrumentID` 做 `std::stable_sort`（严格保留同合约内到达顺序），并对 `float64` 列启用 `BYTE_STREAM_SPLIT` 编码
 
 Parquet 写入按 `row_group_size` 缓冲并写出 row group。
 

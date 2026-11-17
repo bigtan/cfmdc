@@ -150,6 +150,20 @@ ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &fi
         props_builder.version(config_.writer_version == 1 ? parquet::ParquetVersion::PARQUET_1_0
                                                           : parquet::ParquetVersion::PARQUET_2_6);
 
+        if (config_.writer_version != 1)
+        {
+            // Disable dictionary encoding on float64 price/quantity columns and apply BYTE_STREAM_SPLIT
+            // so sorted per-instrument ticks compress much smaller and faster without dictionary spill.
+            for (const auto &field : impl_->schema->fields())
+            {
+                if (field->type()->id() == arrow::Type::DOUBLE)
+                {
+                    props_builder.disable_dictionary(field->name());
+                    props_builder.encoding(field->name(), parquet::Encoding::BYTE_STREAM_SPLIT);
+                }
+            }
+        }
+
         auto props = props_builder.build();
 
         // Create Arrow writer properties
@@ -303,6 +317,12 @@ void ParquetMarketDataWriter::flush_buffer()
 
     try
     {
+        // Sort rows by InstrumentID before columnar encoding to maximize RLE/ZSTD/BYTE_STREAM_SPLIT
+        // locality while strictly preserving intra-instrument arrival order.
+        std::stable_sort(rows.begin(), rows.end(), [](const MarketTick &a, const MarketTick &b) {
+            return bounded_sv(a.instrument_id) < bounded_sv(b.instrument_id);
+        });
+
         const auto row_count = static_cast<int64_t>(rows.size());
 
 #define RESERVE_BUILDER(builder) check_arrow_status((builder).Reserve(row_count))

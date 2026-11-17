@@ -3,11 +3,11 @@ cmake_minimum_required(VERSION 3.31)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(NOT DEFINED CMAKE_C_COMPILER)
-        set(CMAKE_C_COMPILER clang CACHE STRING "C compiler" FORCE)
+    if(NOT DEFINED CMAKE_C_COMPILER AND "$ENV{CC}" STREQUAL "")
+        set(CMAKE_C_COMPILER clang CACHE STRING "C compiler")
     endif()
-    if(NOT DEFINED CMAKE_CXX_COMPILER)
-        set(CMAKE_CXX_COMPILER clang++ CACHE STRING "C++ compiler" FORCE)
+    if(NOT DEFINED CMAKE_CXX_COMPILER AND "$ENV{CXX}" STREQUAL "")
+        set(CMAKE_CXX_COMPILER clang++ CACHE STRING "C++ compiler")
     endif()
 endif()
 
@@ -122,7 +122,11 @@ function(cfmdc_apply_linux_clang_cxx_runtime target_name)
 endfunction()
 
 function(cfmdc_apply_version_metadata target_name)
-    target_compile_definitions(${target_name} PRIVATE CFMDC_VERSION="${PROJECT_VERSION}")
+    set(visibility PRIVATE)
+    if(ARGC GREATER 1)
+        set(visibility "${ARGV1}")
+    endif()
+    target_compile_definitions(${target_name} ${visibility} CFMDC_VERSION="${PROJECT_VERSION}")
 endfunction()
 
 
@@ -137,8 +141,6 @@ find_package(args CONFIG REQUIRED)
 if(CFMDC_ENABLE_PARQUET)
     find_package(Arrow CONFIG REQUIRED)
     find_package(Parquet CONFIG REQUIRED)
-    find_package(mimalloc CONFIG REQUIRED)
-    add_compile_definitions(CFMDC_ENABLE_PARQUET)
 endif()
 
 # 查找 CTP
@@ -150,55 +152,70 @@ include(CopyCTP)
 # ==============================================================================
 # 8. 构建目标
 # ==============================================================================
-set(CFMDC_SOURCES
-    src/main.cpp
-    src/config/Config.cpp
-    src/core/Application.cpp
-    src/core/MdSpi.cpp
-    src/core/TraderSpi.cpp
-    src/utils/ApiWrapper.cpp
+set(CFMDC_STORAGE_SOURCES
     src/utils/CsvWriter.cpp
     src/utils/FileManager.cpp
 )
 
 if(CFMDC_ENABLE_PARQUET)
-    list(APPEND CFMDC_SOURCES src/utils/ParquetWriter.cpp)
+    list(APPEND CFMDC_STORAGE_SOURCES src/utils/ParquetWriter.cpp)
 endif()
 
-add_executable(cfmdc ${CFMDC_SOURCES})
+add_library(cfmdc_storage STATIC ${CFMDC_STORAGE_SOURCES})
 
-target_include_directories(cfmdc PRIVATE 
+target_include_directories(cfmdc_storage PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-cfmdc_apply_version_metadata(cfmdc)
+cfmdc_apply_version_metadata(cfmdc_storage PRIVATE)
 
-target_link_libraries(cfmdc PRIVATE
+target_link_libraries(cfmdc_storage PUBLIC
     spdlog::spdlog
-    tomlplusplus::tomlplusplus
-    taywee::args
     CTP::ctp
 )
 
-cfmdc_apply_linux_clang_cxx_runtime(cfmdc)
-
 if(CFMDC_ENABLE_PARQUET)
-    target_link_libraries(cfmdc PRIVATE
+    target_compile_definitions(cfmdc_storage PUBLIC CFMDC_ENABLE_PARQUET)
+    target_link_libraries(cfmdc_storage PUBLIC
         Arrow::arrow_static
         Parquet::parquet_static
-        mimalloc
     )
     if(MSVC)
-        target_compile_definitions(cfmdc PRIVATE ARROW_STATIC PARQUET_STATIC)
+        target_compile_definitions(cfmdc_storage PUBLIC ARROW_STATIC PARQUET_STATIC)
     endif()
 endif()
+
+add_library(cfmdc_core STATIC
+    src/config/Config.cpp
+    src/utils/ApiWrapper.cpp
+    src/core/TraderSpi.cpp
+    src/core/MdSpi.cpp
+    src/core/Application.cpp
+)
+
+cfmdc_apply_version_metadata(cfmdc_core PUBLIC)
+
+target_link_libraries(cfmdc_core PUBLIC
+    cfmdc_storage
+    tomlplusplus::tomlplusplus
+    CTP::ctp
+)
+
+add_executable(cfmdc src/main.cpp)
+
+target_link_libraries(cfmdc PRIVATE
+    cfmdc_core
+    taywee::args
+)
+
+cfmdc_apply_linux_clang_cxx_runtime(cfmdc)
 
 # 拷贝 CTP 运行时库
 copy_ctp_runtime_libs(cfmdc)
 
 # 安装
 install(TARGETS cfmdc RUNTIME DESTINATION bin)
-install(FILES config.toml.example DESTINATION etc/cfmdc RENAME config.toml)
+install(FILES config.toml.example DESTINATION etc/cfmdc RENAME config.toml PERMISSIONS OWNER_READ OWNER_WRITE)
 
 # 测试
 option(CFMDC_BUILD_TESTS "Build unit tests" ON)

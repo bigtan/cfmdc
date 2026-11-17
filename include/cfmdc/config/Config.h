@@ -1,8 +1,8 @@
 #pragma once
 
-#include <toml++/toml.h>
-
+#include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,8 +13,8 @@ namespace cfmdc
 {
 
 /// @brief Configuration manager for CTP market data collector
-/// @details Loads and validates configuration from TOML file
-///          Supports both single and multiple front servers
+/// @details Eagerly loads and validates configuration from TOML file into typed members
+///          Supports both single and multiple front servers and env-var credential overrides
 /// @thread_safety Not thread-safe. Should be initialized once at startup.
 class Config
 {
@@ -37,7 +37,10 @@ class Config
     /// @details Reads Application.SubList. Front.SubList is accepted as a
     ///          deprecated fallback for backward compatibility.
     /// @return Subscription list or "null" if not specified
-    std::string subscription_list() const;
+    const std::string &subscription_list() const noexcept
+    {
+        return subscription_list_;
+    }
 
     /// @brief Get CSV storage path with trading day placeholders resolved
     /// @param trading_day Trading day in YYYYMMDD format
@@ -51,38 +54,67 @@ class Config
 
     /// @brief Get flow file path for CTP API
     /// @return Path to flow directory (default: "./flow")
-    std::filesystem::path flow_path() const;
+    const std::filesystem::path &flow_path() const noexcept
+    {
+        return flow_path_;
+    }
 
     /// @brief Get initialization timeout in seconds
-    /// @return Timeout value (default: 60 seconds)
-    int init_timeout() const;
+    /// @return Timeout value in [1, 3600] (default: 60 seconds)
+    int init_timeout() const noexcept
+    {
+        return init_timeout_;
+    }
 
-    /// @brief Get CPU core for worker thread affinity (-1 for no affinity)
-    /// @return CPU core index or -1 (default: -1)
-    int worker_thread_core() const;
+    /// @brief Get CPU core for worker thread affinity (-1 for none, -2 for auto)
+    /// @return CPU core index, -1, or -2 (default: -1)
+    int worker_thread_core() const noexcept
+    {
+        return worker_thread_core_;
+    }
+
+    /// @brief Get CPU core for Parquet compression/writer thread affinity (-1 for none, -2 for auto)
+    /// @return CPU core index, -1, or -2 (default: -2 if WorkerThreadCore is "auto", else -1)
+    int parquet_worker_thread_core() const noexcept
+    {
+        return parquet_worker_thread_core_;
+    }
+
+    /// @brief Whether option contracts are included when subscribing to full market
+    /// @return true if options are included (default: false)
+    bool include_options() const noexcept
+    {
+        return include_options_;
+    }
 
     /// @brief Get storage mode
     /// @return Storage mode (CSV, Parquet, or Hybrid)
-    StorageMode storage_mode() const;
+    StorageMode storage_mode() const noexcept
+    {
+        return storage_mode_;
+    }
 
     /// @brief Get Parquet row-group size
     /// @return Rows per group (default: 100000)
-    size_t parquet_row_group_size() const;
-
-    /// @brief Get raw TOML configuration
-    /// @return Reference to TOML table
-    const toml::table &raw_config() const noexcept
+    size_t parquet_row_group_size() const noexcept
     {
-        return config_;
+        return parquet_row_group_size_;
     }
 
   private:
-    void validate_config();
-    void parse_front_servers();
-    std::string resolve_path_placeholders(const std::string &path_template, const std::string &trading_day) const;
+    static std::string resolve_path_placeholders(const std::string &path_template, const std::string &trading_day);
 
-    toml::table config_;
     std::vector<FrontServer> front_servers_;
+    std::string subscription_list_{"null"};
+    std::optional<std::string> csv_path_template_;
+    std::optional<std::string> parquet_path_template_;
+    std::filesystem::path flow_path_{"./flow"};
+    int init_timeout_{60};
+    int worker_thread_core_{-1};
+    int parquet_worker_thread_core_{-1};
+    bool include_options_{false};
+    StorageMode storage_mode_{StorageMode::CSV};
+    size_t parquet_row_group_size_{100000};
 };
 
 } // namespace cfmdc

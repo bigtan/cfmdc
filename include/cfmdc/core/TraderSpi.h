@@ -8,6 +8,9 @@
 #include <filesystem>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "cfmdc/core/InitializationTracker.h"
@@ -61,9 +64,17 @@ class TraderSpi : public CThostFtdcTraderSpi
         return initialization_tracker_.wait_for(timeout);
     }
 
-    /// @brief Get instrument IDs (thread-safe)
-    /// @return Vector of instrument IDs
+    /// @brief Get queried futures instrument IDs (thread-safe, sorted and deduplicated)
+    /// @return Vector of futures instrument IDs
     std::vector<std::string> get_instrument_ids() const;
+
+    /// @brief Resolve target subscription instruments against the queried CTP catalog
+    /// @param requested Explicitly requested instrument IDs (empty means all eligible market contracts)
+    /// @param include_options Include options (Options/SpotOption) when requested is empty
+    /// @return Resolved instrument IDs
+    /// @throws std::runtime_error if any explicitly requested instrument is missing from the catalog
+    std::vector<std::string> resolve_subscription_instruments(const std::vector<std::string> &requested,
+                                                            bool include_options) const;
 
     /// @brief Get the current trading day
     /// @return Trading day string (YYYYMMDD)
@@ -91,7 +102,17 @@ class TraderSpi : public CThostFtdcTraderSpi
     /// @brief Wait for current instrument query request to complete
     /// @param timeout Maximum time to wait
     /// @return true if the current query completed before timeout
-    bool wait_for_instrument_query_completion(std::chrono::seconds timeout);
+    template <typename Rep, typename Period>
+    bool wait_for_instrument_query_completion(std::chrono::duration<Rep, Period> timeout)
+    {
+        std::unique_lock lock(instrument_query_mutex_);
+        if (!instrument_query_in_flight_)
+        {
+            return instrument_query_completed_;
+        }
+
+        return instrument_query_cv_.wait_for(lock, timeout, [this]() { return instrument_query_completed_; });
+    }
 
   private:
     TraderApiWrapper trader_api_;
@@ -103,7 +124,7 @@ class TraderSpi : public CThostFtdcTraderSpi
 
     // Protected by mutex
     mutable std::shared_mutex instrument_mutex_;
-    std::vector<std::string> instrument_ids_;
+    std::unordered_map<std::string, TThostFtdcProductClassType> instrument_catalog_;
     std::mutex instrument_query_mutex_;
     std::condition_variable instrument_query_cv_;
     bool instrument_query_in_flight_{false};

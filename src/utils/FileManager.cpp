@@ -3,18 +3,78 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
-#include <iterator>
+#include <format>
 #include <stdexcept>
 
+#include "cfmdc/utils/Error.h"
 #include "cfmdc/utils/Helpers.h"
 #include "cfmdc/utils/MarketDataTimePolicy.h"
 
 namespace cfmdc
 {
+
+namespace
+{
+
+/// @brief Time-budgeted adaptive backoff (spin -> yield -> jittered sleep) for worker polling loops
+class AdaptiveBackoff
+{
+  public:
+    using clock = std::chrono::steady_clock;
+
+    static constexpr auto kSpinBudget = std::chrono::microseconds(8);
+    static constexpr auto kYieldBudget = std::chrono::microseconds(80);
+    static constexpr auto kSleepMin = std::chrono::microseconds(50);
+    static constexpr auto kSleepMax = std::chrono::microseconds(2000);
+    static constexpr int kJitterPercent = 10;
+
+    AdaptiveBackoff() noexcept
+    {
+        reset(clock::now());
+    }
+
+    void reset(clock::time_point now = clock::now()) noexcept
+    {
+        spin_deadline_ = now + kSpinBudget;
+        yield_deadline_ = spin_deadline_ + kYieldBudget;
+        sleep_duration_ = kSleepMin;
+    }
+
+    void wait_once(clock::time_point now = clock::now()) noexcept
+    {
+        if (now < spin_deadline_)
+        {
+            cpu_relax();
+            return;
+        }
+        if (now < yield_deadline_)
+        {
+            std::this_thread::yield();
+            return;
+        }
+        std::this_thread::sleep_for(jittered_sleep(sleep_duration_));
+        sleep_duration_ = (std::min)(sleep_duration_ * 2, kSleepMax);
+    }
+
+  private:
+    std::chrono::microseconds jittered_sleep(std::chrono::microseconds base) noexcept
+    {
+        jitter_state_ = jitter_state_ * 1664525u + 1013904223u;
+        const int jitter = static_cast<int>(jitter_state_ % (2 * kJitterPercent + 1)) - kJitterPercent;
+        const auto delta = std::chrono::microseconds(static_cast<int64_t>(base.count()) * jitter / 100);
+        const auto adjusted = base + delta;
+        return adjusted < std::chrono::microseconds(1) ? std::chrono::microseconds(1) : adjusted;
+    }
+
+    clock::time_point spin_deadline_{};
+    clock::time_point yield_deadline_{};
+    std::chrono::microseconds sleep_duration_{kSleepMin};
+    std::uint32_t jitter_state_{0x9e3779b9u};
+};
+
+} // namespace
 
 AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const std::filesystem::path &parquet_path,
                                    const std::string &trading_day, const std::string &base_action_day,
@@ -32,6 +92,11 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
         throw std::invalid_argument("Parquet storage requires a build with Parquet support");
     }
 #endif
+
+    if (!is_valid_trading_day(trading_day_))
+    {
+        throw FileException(std::format("Invalid trading day '{}': expected 8 digits (YYYYMMDD)", trading_day_));
+    }
 
     startup_time_hms_ = startup_time_hms;
     if (startup_time_hms_.empty())
@@ -64,7 +129,6 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
 #endif
 
     const auto mode_str = to_string(storage_mode_);
-
     const char *window_str = market_data_time::to_string(startup_window_);
     spdlog::info("AsyncFileManager initialized: mode={}, csv_path={}, parquet_path={}, "
                  "trading_day={}, base_action_day={}, next_action_day={}",
@@ -74,50 +138,48 @@ AsyncFileManager::AsyncFileManager(const std::filesystem::path &csv_path, const 
     spdlog::info("AsyncFileManager UpdateTime filter configured: startup_time={}, window={}", startup_time_hms_,
                  window_str);
 
+    bool has_parquet_worker = false;
 #ifdef CFMDC_ENABLE_PARQUET
     if (parquet_writer_)
     {
+        has_parquet_worker = true;
         parquet_worker_active_.store(true, std::memory_order_release);
         parquet_worker_thread_ = std::jthread([this](std::stop_token st) { parquet_worker_loop(st); });
     }
 #endif
     worker_thread_ = std::jthread([this](std::stop_token st) { worker_loop(st); });
 
-    // Apply thread affinity
-    int actual_core = options.worker_core;
-    unsigned int hardware_threads = std::thread::hardware_concurrency();
+    const int effective_parquet_cfg = has_parquet_worker ? options.parquet_worker_core : -1;
+    const auto [ingest_core, parquet_core] = resolve_worker_cores(options.worker_core, effective_parquet_cfg);
 
-    if (options.worker_core == -2)
-    {
-        // Auto-select core: skip core 0 if possible as it handles most interrupts
-        if (hardware_threads > 1)
+    auto apply_affinity = [](std::jthread &thread, int requested_cfg, int resolved_core, std::string_view role) {
+        if (requested_cfg >= 0 && resolved_core < 0)
         {
-            actual_core = static_cast<int>(hardware_threads - 1); // Use the last core
+            spdlog::warn("Configured {} core ({}) is unavailable in current process affinity; affinity disabled", role,
+                         requested_cfg);
+            return;
         }
-        else
+        if (resolved_core >= 0)
         {
-            actual_core = -1; // Single core, no affinity
+            if (set_thread_affinity(thread, resolved_core))
+            {
+                spdlog::info("{} worker thread pinned to CPU core: {} (mode: {})", role, resolved_core,
+                             requested_cfg == -2 ? "auto" : "manual");
+            }
+            else
+            {
+                spdlog::warn("Failed to pin {} worker thread to CPU core: {}", role, resolved_core);
+            }
         }
-    }
-    else if (options.worker_core >= static_cast<int>(hardware_threads))
-    {
-        spdlog::warn("Configured WorkerThreadCore ({}) exceeds available hardware threads ({}), affinity disabled",
-                     options.worker_core, hardware_threads);
-        actual_core = -1;
-    }
+    };
 
-    if (actual_core >= 0)
+    apply_affinity(worker_thread_, options.worker_core, ingest_core, "Ingest");
+#ifdef CFMDC_ENABLE_PARQUET
+    if (has_parquet_worker)
     {
-        if (set_thread_affinity(worker_thread_, actual_core))
-        {
-            spdlog::info("Worker thread pinned to CPU core: {} (mode: {})", actual_core,
-                         options.worker_core == -2 ? "auto" : "manual");
-        }
-        else
-        {
-            spdlog::warn("Failed to pin worker thread to CPU core: {}", actual_core);
-        }
+        apply_affinity(parquet_worker_thread_, options.parquet_worker_core, parquet_core, "Parquet");
     }
+#endif
 }
 
 AsyncFileManager::~AsyncFileManager()
@@ -126,37 +188,50 @@ AsyncFileManager::~AsyncFileManager()
     (void)close_all();
 }
 
-bool AsyncFileManager::write_market_data_async(const CThostFtdcDepthMarketDataField &data)
+bool AsyncFileManager::write_market_data_async(const MarketTick &tick)
 {
     // Enqueue only: no filtering or field rewriting here.
-    return queue_->try_enqueue(data);
+    return queue_->try_enqueue(tick);
 }
 
-bool AsyncFileManager::process_market_data(CThostFtdcDepthMarketDataField &data) const
+bool AsyncFileManager::write_market_data_async(const CThostFtdcDepthMarketDataField &raw)
 {
-    // Filter first: do NOT rewrite TradingDay/ActionDay for dropped data.
-    if (!market_data_time::should_store_by_update_time(startup_window_, data.UpdateTime))
+    return write_market_data_async(MarketTick::from_ctp(raw));
+}
+
+bool AsyncFileManager::process_market_data(MarketTick &tick)
+{
+    if (!is_safe_instrument_id(bounded_sv(tick.instrument_id)))
     {
+        invalid_records_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Filter before rewriting TradingDay/ActionDay.
+    const std::string_view update_time = bounded_sv(tick.update_time);
+    if (!market_data_time::should_store_by_update_time(startup_window_, update_time))
+    {
+        filtered_records_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     // Override TradingDay with the one from TraderSpi (authoritative)
-    safe_strcpy(data.TradingDay, trading_day_);
+    safe_strcpy(tick.trading_day, trading_day_);
 
     // Calculate ActionDay based on UpdateTime
-    if (market_data_time::should_use_next_action_day(data.UpdateTime))
+    if (market_data_time::should_use_next_action_day(update_time))
     {
-        safe_strcpy(data.ActionDay, action_day_next_);
+        safe_strcpy(tick.action_day, action_day_next_);
     }
     else
     {
-        safe_strcpy(data.ActionDay, action_day_base_);
+        safe_strcpy(tick.action_day, action_day_base_);
     }
 
     return true;
 }
 
-bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDataField &data)
+bool AsyncFileManager::write_processed_market_data(const MarketTick &tick, std::stop_token st)
 {
     if (fatal_error_.load(std::memory_order_acquire))
     {
@@ -165,9 +240,9 @@ bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDa
 
     if (csv_writer_)
     {
-        if (!csv_writer_->write(data))
+        if (!csv_writer_->write(tick))
         {
-            mark_write_failure("CSV write", data.InstrumentID);
+            mark_write_failure(FailureSource::Csv, "CSV write", bounded_sv(tick.instrument_id));
             return false;
         }
         csv_records_.fetch_add(1, std::memory_order_relaxed);
@@ -176,23 +251,61 @@ bool AsyncFileManager::write_processed_market_data(const CThostFtdcDepthMarketDa
 #ifdef CFMDC_ENABLE_PARQUET
     if (parquet_queue_)
     {
-        while (!parquet_queue_->try_enqueue(data))
+        if (!parquet_queue_->try_enqueue(tick))
         {
-            if (fatal_error_.load(std::memory_order_acquire) || !parquet_worker_active_.load(std::memory_order_acquire))
+            using clock = std::chrono::steady_clock;
+            constexpr auto kSpinBudget = std::chrono::microseconds(8);
+            constexpr auto kYieldBudget = std::chrono::microseconds(80);
+            constexpr auto kSleepStep = std::chrono::microseconds(50);
+
+            const auto start = clock::now();
+            const auto spin_deadline = start + kSpinBudget;
+            const auto yield_deadline = spin_deadline + kYieldBudget;
+
+            do
             {
-                return false;
-            }
-            std::this_thread::yield();
+                if (st.stop_requested() || parquet_fatal_.load(std::memory_order_acquire) ||
+                    !parquet_worker_active_.load(std::memory_order_acquire))
+                {
+                    return false;
+                }
+
+                const auto now = clock::now();
+                if (now < spin_deadline)
+                {
+                    cpu_relax();
+                }
+                else if (now < yield_deadline)
+                {
+                    std::this_thread::yield();
+                }
+                else
+                {
+                    std::this_thread::sleep_for(kSleepStep);
+                }
+            } while (!parquet_queue_->try_enqueue(tick));
         }
     }
+#else
+    (void)st;
 #endif
     return true;
 }
 
-void AsyncFileManager::mark_write_failure(std::string_view operation, std::string_view instrument_id)
+void AsyncFileManager::mark_write_failure(FailureSource source, std::string_view operation,
+                                            std::string_view instrument_id)
 {
     const auto failures = write_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (source == FailureSource::Csv)
+    {
+        csv_fatal_.store(true, std::memory_order_release);
+    }
+    else
+    {
+        parquet_fatal_.store(true, std::memory_order_release);
+    }
     fatal_error_.store(true, std::memory_order_release);
+
     if (instrument_id.empty())
     {
         spdlog::critical("Market data storage {} failed (total failures: {}); stopping pipeline", operation, failures);
@@ -226,14 +339,14 @@ bool AsyncFileManager::close_all()
     if (csv_writer_ && !csv_writer_->close_all())
     {
         success = false;
-        mark_write_failure("CSV close");
+        mark_write_failure(FailureSource::Csv, "CSV close");
     }
 
 #ifdef CFMDC_ENABLE_PARQUET
     if (parquet_writer_ && !parquet_writer_->close_all())
     {
         success = false;
-        mark_write_failure("Parquet close");
+        mark_write_failure(FailureSource::Parquet, "Parquet close");
     }
 #endif
     return success;
@@ -245,13 +358,13 @@ bool AsyncFileManager::flush_all()
     if (csv_writer_ && !csv_writer_->flush())
     {
         success = false;
-        mark_write_failure("CSV flush");
+        mark_write_failure(FailureSource::Csv, "CSV flush");
     }
 #ifdef CFMDC_ENABLE_PARQUET
     if (parquet_writer_ && !parquet_writer_->flush())
     {
         success = false;
-        mark_write_failure("Parquet flush");
+        mark_write_failure(FailureSource::Parquet, "Parquet flush");
     }
 #endif
     return success;
@@ -268,6 +381,8 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
     stats.parquet_queue_size = parquet_queue_ ? parquet_queue_->size() : 0;
 #endif
     stats.dropped_records = queue_->overflow_count();
+    stats.filtered_records = filtered_records_.load(std::memory_order_relaxed);
+    stats.invalid_records = invalid_records_.load(std::memory_order_relaxed);
     stats.write_failures = write_failures_.load(std::memory_order_relaxed);
     stats.periodic_flushes = periodic_flushes_.load(std::memory_order_relaxed);
     switch (storage_mode_)
@@ -287,14 +402,8 @@ AsyncFileManager::Statistics AsyncFileManager::get_statistics() const
 
 void AsyncFileManager::worker_loop(std::stop_token st)
 {
-    using namespace std::chrono_literals;
+    set_current_thread_name("cfmdc-ingest");
 
-    // Time-budgeted adaptive backoff with jitter to reduce CPU while keeping latency low.
-    constexpr auto kSpinBudget = 8us;
-    constexpr auto kYieldBudget = 80us;
-    constexpr auto kSleepMin = 50us;
-    constexpr auto kSleepMax = 2000us;
-    constexpr int kJitterPercent = 10;
     constexpr size_t kBatchSize = 64;
 
     // Durability: bound CSV data lost on an abnormal exit (cheap ofstream flush).
@@ -302,26 +411,8 @@ void AsyncFileManager::worker_loop(std::stop_token st)
     // groups, and without the file footer (written on close) the file is
     // unreadable anyway - Parquet durability relies on graceful shutdown.
     using clock = std::chrono::steady_clock;
-    auto spin_deadline = clock::now() + kSpinBudget;
-    auto yield_deadline = spin_deadline + kYieldBudget;
-    auto sleep_duration = kSleepMin;
+    AdaptiveBackoff backoff;
     auto next_csv_flush = clock::now() + csv_flush_interval_;
-    std::uint32_t jitter_state = 0x9e3779b9u;
-
-    auto reset_backoff = [&]() {
-        auto now = clock::now();
-        spin_deadline = now + kSpinBudget;
-        yield_deadline = spin_deadline + kYieldBudget;
-        sleep_duration = kSleepMin;
-    };
-
-    auto jittered_sleep = [&](std::chrono::microseconds base) {
-        jitter_state = jitter_state * 1664525u + 1013904223u;
-        int jitter = static_cast<int>(jitter_state % (2 * kJitterPercent + 1)) - kJitterPercent;
-        auto delta = std::chrono::microseconds(static_cast<int64_t>(base.count()) * jitter / 100);
-        auto adjusted = base + delta;
-        return adjusted < 1us ? 1us : adjusted;
-    };
 
     auto flush_csv_if_due = [&](clock::time_point now) {
         if (!csv_writer_ || now < next_csv_flush)
@@ -330,7 +421,7 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         }
         if (!csv_writer_->flush())
         {
-            mark_write_failure("periodic flush");
+            mark_write_failure(FailureSource::Csv, "periodic flush");
             return false;
         }
         periodic_flushes_.fetch_add(1, std::memory_order_relaxed);
@@ -338,12 +429,12 @@ void AsyncFileManager::worker_loop(std::stop_token st)
         return true;
     };
 
-    auto process_slot = [&](CThostFtdcDepthMarketDataField &slot) {
+    auto process_slot = [&](MarketTick &slot) {
         if (!process_market_data(slot))
         {
             return true;
         }
-        return write_processed_market_data(slot);
+        return write_processed_market_data(slot, st);
     };
 
     while (!st.stop_requested())
@@ -365,37 +456,23 @@ void AsyncFileManager::worker_loop(std::stop_token st)
             ++count;
         }
 
+        const auto now = clock::now();
         if (count > 0)
         {
-            if (!flush_csv_if_due(clock::now()))
+            if (!flush_csv_if_due(now))
             {
                 return;
             }
-            reset_backoff();
+            backoff.reset(now);
             continue;
         }
-
-        auto now = clock::now();
 
         if (!flush_csv_if_due(now))
         {
             return;
         }
 
-        if (now < spin_deadline)
-        {
-            cpu_relax();
-            continue;
-        }
-
-        if (now < yield_deadline)
-        {
-            std::this_thread::yield();
-            continue;
-        }
-
-        std::this_thread::sleep_for(jittered_sleep(sleep_duration));
-        sleep_duration = (std::min)(sleep_duration * 2, kSleepMax);
+        backoff.wait_once(now);
     }
 
     // Process remaining items in-place
@@ -413,8 +490,10 @@ void AsyncFileManager::worker_loop(std::stop_token st)
 #ifdef CFMDC_ENABLE_PARQUET
 void AsyncFileManager::parquet_worker_loop(std::stop_token st)
 {
-    using namespace std::chrono_literals;
+    set_current_thread_name("cfmdc-parquet");
+
     constexpr size_t kBatchSize = 64;
+    AdaptiveBackoff backoff;
 
     struct ActiveGuard
     {
@@ -425,17 +504,17 @@ void AsyncFileManager::parquet_worker_loop(std::stop_token st)
         }
     } active_guard{parquet_worker_active_};
 
-    auto write_slot = [&](const CThostFtdcDepthMarketDataField &slot) {
+    auto write_slot = [&](const MarketTick &slot) {
         if (!parquet_writer_->write(slot))
         {
-            mark_write_failure("Parquet write", slot.InstrumentID);
+            mark_write_failure(FailureSource::Parquet, "Parquet write", bounded_sv(slot.instrument_id));
             return false;
         }
         parquet_records_.fetch_add(1, std::memory_order_relaxed);
         return true;
     };
 
-    while (!st.stop_requested() && !fatal_error_.load(std::memory_order_acquire))
+    while (!st.stop_requested() && !parquet_fatal_.load(std::memory_order_acquire))
     {
         size_t count = 0;
         while (count < kBatchSize)
@@ -453,14 +532,15 @@ void AsyncFileManager::parquet_worker_loop(std::stop_token st)
             }
             ++count;
         }
-        if (count == 0)
+        if (count > 0)
         {
-            std::this_thread::sleep_for(200us);
+            backoff.reset();
             continue;
         }
+        backoff.wait_once();
     }
 
-    if (fatal_error_.load(std::memory_order_acquire))
+    if (parquet_fatal_.load(std::memory_order_acquire))
     {
         return;
     }

@@ -12,10 +12,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <format>
+#include <stdexcept>
+#include <string_view>
+#include <vector>
 
+#include "cfmdc/utils/Error.h"
 #include "cfmdc/utils/Helpers.h"
+#include "cfmdc/utils/TimeUtils.h"
 
 namespace cfmdc
 {
@@ -23,14 +27,22 @@ namespace cfmdc
 namespace
 {
 
-/// @brief Fast length check for CTP char[9] fields that are normally 8-byte dates/times
-inline int32_t fast_date_time_len(const char (&str)[9]) noexcept
+inline void check_arrow_status(const arrow::Status &status)
 {
-    if (str[0] != '\0' && str[7] != '\0' && str[8] == '\0')
+    if (!status.ok())
     {
-        return 8;
+        throw std::runtime_error(status.ToString());
     }
-    return static_cast<int32_t>(std::char_traits<char>::length(str));
+}
+
+inline void append_bounded_string(arrow::StringBuilder &builder, std::string_view sv)
+{
+    check_arrow_status(builder.Append(sv.data(), static_cast<int32_t>(sv.size())));
+}
+
+inline void append_ctp_double(arrow::DoubleBuilder &builder, double value)
+{
+    check_arrow_status(is_valid_ctp_price(value) ? builder.Append(value) : builder.AppendNull());
 }
 
 } // namespace
@@ -76,7 +88,7 @@ class ParquetMarketDataWriter::Impl
     arrow::StringBuilder action_day_builder;
 
     // Row-group buffer. write() only copies rows here; Arrow builders are touched in flush_buffer().
-    std::vector<CThostFtdcDepthMarketDataField> row_buffer;
+    std::vector<MarketTick> row_buffer;
 };
 
 ParquetMarketDataWriter::ParquetMarketDataWriter(const std::filesystem::path &file_path, const Config &config)
@@ -254,11 +266,11 @@ void ParquetMarketDataWriter::initialize_schema()
     impl_->schema = arrow::schema(fields);
 }
 
-bool ParquetMarketDataWriter::write(const CThostFtdcDepthMarketDataField &data)
+bool ParquetMarketDataWriter::write(const MarketTick &tick)
 {
     try
     {
-        append_to_buffer(data);
+        append_to_buffer(tick);
         record_count_++;
 
         // Flush one row group at a time to avoid building and concatenating many small tables.
@@ -276,9 +288,9 @@ bool ParquetMarketDataWriter::write(const CThostFtdcDepthMarketDataField &data)
     }
 }
 
-void ParquetMarketDataWriter::append_to_buffer(const CThostFtdcDepthMarketDataField &data)
+void ParquetMarketDataWriter::append_to_buffer(const MarketTick &tick)
 {
-    impl_->row_buffer.push_back(data);
+    impl_->row_buffer.push_back(tick);
 }
 
 void ParquetMarketDataWriter::flush_buffer()
@@ -293,26 +305,16 @@ void ParquetMarketDataWriter::flush_buffer()
     {
         const auto row_count = static_cast<int64_t>(rows.size());
 
-#define CHECK_STATUS(expr)                                                                                             \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        auto status = (expr);                                                                                          \
-        if (!status.ok())                                                                                              \
-        {                                                                                                              \
-            throw std::runtime_error(status.ToString());                                                               \
-        }                                                                                                              \
-    } while (0)
-
-#define RESERVE_BUILDER(builder) CHECK_STATUS((builder).Reserve(row_count))
+#define RESERVE_BUILDER(builder) check_arrow_status((builder).Reserve(row_count))
 #define RESERVE_STRING_BUILDER(builder, bytes)                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        CHECK_STATUS((builder).Reserve(row_count));                                                                    \
-        CHECK_STATUS((builder).ReserveData(bytes));                                                                    \
+        check_arrow_status((builder).Reserve(row_count));                                                              \
+        check_arrow_status((builder).ReserveData(bytes));                                                              \
     } while (0)
 
         RESERVE_STRING_BUILDER(impl_->trading_day_builder, row_count * 8);
-        RESERVE_STRING_BUILDER(impl_->instrument_id_builder, row_count * 8);
+        RESERVE_STRING_BUILDER(impl_->instrument_id_builder, row_count * 16);
         RESERVE_STRING_BUILDER(impl_->exchange_id_builder, row_count * 6);
         RESERVE_BUILDER(impl_->last_price_builder);
         RESERVE_BUILDER(impl_->pre_settlement_price_builder);
@@ -349,60 +351,43 @@ void ParquetMarketDataWriter::flush_buffer()
 
         for (const auto &row : rows)
         {
-            CHECK_STATUS(impl_->trading_day_builder.Append(row.TradingDay, fast_date_time_len(row.TradingDay)));
-            CHECK_STATUS(impl_->instrument_id_builder.Append(
-                row.InstrumentID, static_cast<int32_t>(std::char_traits<char>::length(row.InstrumentID))));
-            CHECK_STATUS(impl_->exchange_id_builder.Append(
-                row.ExchangeID, static_cast<int32_t>(std::char_traits<char>::length(row.ExchangeID))));
-            impl_->last_price_builder.UnsafeAppend(clean_price(row.LastPrice));
-            impl_->pre_settlement_price_builder.UnsafeAppend(clean_price(row.PreSettlementPrice));
-            impl_->pre_close_price_builder.UnsafeAppend(clean_price(row.PreClosePrice));
-            impl_->pre_open_interest_builder.UnsafeAppend(row.PreOpenInterest);
-            impl_->open_price_builder.UnsafeAppend(clean_price(row.OpenPrice));
-            impl_->highest_price_builder.UnsafeAppend(clean_price(row.HighestPrice));
-            impl_->lowest_price_builder.UnsafeAppend(clean_price(row.LowestPrice));
-            impl_->volume_builder.UnsafeAppend(row.Volume);
-            impl_->turnover_builder.UnsafeAppend(clean_price(row.Turnover));
-            impl_->open_interest_builder.UnsafeAppend(row.OpenInterest);
-            impl_->close_price_builder.UnsafeAppend(clean_price(row.ClosePrice));
-            impl_->settlement_price_builder.UnsafeAppend(clean_price(row.SettlementPrice));
-            impl_->upper_limit_price_builder.UnsafeAppend(clean_price(row.UpperLimitPrice));
-            impl_->lower_limit_price_builder.UnsafeAppend(clean_price(row.LowerLimitPrice));
-            impl_->pre_delta_builder.UnsafeAppend(clean_price(row.PreDelta));
-            impl_->curr_delta_builder.UnsafeAppend(clean_price(row.CurrDelta));
-            CHECK_STATUS(impl_->update_time_builder.Append(row.UpdateTime, fast_date_time_len(row.UpdateTime)));
-            impl_->update_millisec_builder.UnsafeAppend(row.UpdateMillisec);
+            append_bounded_string(impl_->trading_day_builder, bounded_sv(row.trading_day));
+            append_bounded_string(impl_->instrument_id_builder, bounded_sv(row.instrument_id));
+            append_bounded_string(impl_->exchange_id_builder, bounded_sv(row.exchange_id));
+            append_ctp_double(impl_->last_price_builder, row.last_price);
+            append_ctp_double(impl_->pre_settlement_price_builder, row.pre_settlement_price);
+            append_ctp_double(impl_->pre_close_price_builder, row.pre_close_price);
+            append_ctp_double(impl_->pre_open_interest_builder, row.pre_open_interest);
+            append_ctp_double(impl_->open_price_builder, row.open_price);
+            append_ctp_double(impl_->highest_price_builder, row.highest_price);
+            append_ctp_double(impl_->lowest_price_builder, row.lowest_price);
+            impl_->volume_builder.UnsafeAppend(row.volume);
+            append_ctp_double(impl_->turnover_builder, row.turnover);
+            append_ctp_double(impl_->open_interest_builder, row.open_interest);
+            append_ctp_double(impl_->close_price_builder, row.close_price);
+            append_ctp_double(impl_->settlement_price_builder, row.settlement_price);
+            append_ctp_double(impl_->upper_limit_price_builder, row.upper_limit_price);
+            append_ctp_double(impl_->lower_limit_price_builder, row.lower_limit_price);
+            append_ctp_double(impl_->pre_delta_builder, row.pre_delta);
+            append_ctp_double(impl_->curr_delta_builder, row.curr_delta);
+            append_bounded_string(impl_->update_time_builder, bounded_sv(row.update_time));
+            impl_->update_millisec_builder.UnsafeAppend(row.update_millisec);
 
-            impl_->bid_price_builders[0].UnsafeAppend(clean_price(row.BidPrice1));
-            impl_->bid_volume_builders[0].UnsafeAppend(row.BidVolume1);
-            impl_->ask_price_builders[0].UnsafeAppend(clean_price(row.AskPrice1));
-            impl_->ask_volume_builders[0].UnsafeAppend(row.AskVolume1);
-            impl_->bid_price_builders[1].UnsafeAppend(clean_price(row.BidPrice2));
-            impl_->bid_volume_builders[1].UnsafeAppend(row.BidVolume2);
-            impl_->ask_price_builders[1].UnsafeAppend(clean_price(row.AskPrice2));
-            impl_->ask_volume_builders[1].UnsafeAppend(row.AskVolume2);
-            impl_->bid_price_builders[2].UnsafeAppend(clean_price(row.BidPrice3));
-            impl_->bid_volume_builders[2].UnsafeAppend(row.BidVolume3);
-            impl_->ask_price_builders[2].UnsafeAppend(clean_price(row.AskPrice3));
-            impl_->ask_volume_builders[2].UnsafeAppend(row.AskVolume3);
-            impl_->bid_price_builders[3].UnsafeAppend(clean_price(row.BidPrice4));
-            impl_->bid_volume_builders[3].UnsafeAppend(row.BidVolume4);
-            impl_->ask_price_builders[3].UnsafeAppend(clean_price(row.AskPrice4));
-            impl_->ask_volume_builders[3].UnsafeAppend(row.AskVolume4);
-            impl_->bid_price_builders[4].UnsafeAppend(clean_price(row.BidPrice5));
-            impl_->bid_volume_builders[4].UnsafeAppend(row.BidVolume5);
-            impl_->ask_price_builders[4].UnsafeAppend(clean_price(row.AskPrice5));
-            impl_->ask_volume_builders[4].UnsafeAppend(row.AskVolume5);
+            for (size_t i = 0; i < 5; ++i)
+            {
+                append_ctp_double(impl_->bid_price_builders[i], row.bid_price[i]);
+                impl_->bid_volume_builders[i].UnsafeAppend(row.bid_volume[i]);
+                append_ctp_double(impl_->ask_price_builders[i], row.ask_price[i]);
+                impl_->ask_volume_builders[i].UnsafeAppend(row.ask_volume[i]);
+            }
 
-            impl_->average_price_builder.UnsafeAppend(clean_price(row.AveragePrice));
-            CHECK_STATUS(impl_->action_day_builder.Append(row.ActionDay, fast_date_time_len(row.ActionDay)));
+            append_ctp_double(impl_->average_price_builder, row.average_price);
+            append_bounded_string(impl_->action_day_builder, bounded_sv(row.action_day));
         }
 
         // Finish all builders and create arrays
         std::vector<std::shared_ptr<arrow::Array>> arrays;
         arrays.reserve(impl_->schema->num_fields());
-
-        std::shared_ptr<arrow::Array> array;
 
 #define FINISH_BUILDER(builder)                                                                                        \
     do                                                                                                                 \
@@ -453,7 +438,6 @@ void ParquetMarketDataWriter::flush_buffer()
         FINISH_BUILDER(impl_->action_day_builder);
 
 #undef FINISH_BUILDER
-#undef CHECK_STATUS
 
         // Create table from arrays
         auto table = arrow::Table::Make(impl_->schema, arrays);
@@ -507,42 +491,39 @@ ParquetBatchWriter::ParquetBatchWriter(const std::filesystem::path &base_path, c
                                        const ParquetMarketDataWriter::Config &config)
     : base_path_(base_path), trading_day_(trading_day), config_(config)
 {
+    if (!is_valid_trading_day(trading_day_))
+    {
+        throw FileException(std::format("Invalid trading day '{}': expected 8 digits (YYYYMMDD)", trading_day_));
+    }
+
     try
     {
-        // Create trading day directory: base_path / trading_day
-        // trading_day_dir_ = base_path_ / trading_day_;
-
-        // Ensure trading day directory exists
-        if (!std::filesystem::exists(base_path_))
+        if (!base_path_.empty())
         {
             std::error_code ec;
-            std::filesystem::create_directories(base_path_, ec);
+            const bool created = std::filesystem::create_directories(base_path_, ec);
             if (ec)
             {
                 spdlog::error("Failed to create directory {}: {}", base_path_.string(), ec.message());
                 throw std::runtime_error("Failed to create directory: " + ec.message());
             }
-            spdlog::info("Created trading day directory: {}", base_path_.string());
+            if (created)
+            {
+                spdlog::info("Created trading day directory: {}", base_path_.string());
+            }
         }
 
-        // Generate timestamped filename for this session
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
-        std::tm tm;
-#ifdef _WIN32
-        localtime_s(&tm, &time_t);
-#else
-        localtime_r(&time_t, &tm);
-#endif
+        // Generate timestamped filename for this session in fixed China Standard Time (UTC+8)
+        const auto now = std::chrono::system_clock::now();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+        const std::tm tm = time_utils::to_china_tm(now);
 
         // Create timestamped file: YYYYMMDD_HHMMSS_mmm.parquet
         std::string filename =
             std::format("{:04d}{:02d}{:02d}_{:02d}{:02d}{:02d}_{:03d}.parquet", tm.tm_year + 1900, tm.tm_mon + 1,
                         tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms.count()));
 
-        // Full path: base_path / trading_day / timestamp.parquet
+        // Full path: base_path / timestamp.parquet
         current_file_path_ = base_path_ / filename;
 
         writer_ = std::make_unique<ParquetMarketDataWriter>(current_file_path_, config_);
@@ -565,13 +546,13 @@ ParquetBatchWriter::~ParquetBatchWriter()
     spdlog::info("ParquetBatchWriter closed. Data saved to: {}", current_file_path_.string());
 }
 
-bool ParquetBatchWriter::write(const CThostFtdcDepthMarketDataField &data)
+bool ParquetBatchWriter::write(const MarketTick &tick)
 {
     try
     {
         if (writer_)
         {
-            return writer_->write(data);
+            return writer_->write(tick);
         }
         return false;
     }

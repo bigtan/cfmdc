@@ -10,6 +10,7 @@
 
 #include "IMarketDataWriter.h"
 #include "ThostFtdcUserApiStruct.h"
+#include "cfmdc/types/MarketTick.h"
 #include "cfmdc/types/StorageMode.h"
 #include "cfmdc/utils/CsvWriter.h"
 #include "cfmdc/utils/LockFreeQueue.h"
@@ -31,6 +32,7 @@ class AsyncFileManager
     struct Options
     {
         int worker_core{-1};
+        int parquet_worker_core{-1};
         std::chrono::milliseconds csv_flush_interval{std::chrono::seconds(5)};
         size_t parquet_row_group_size{100000};
     };
@@ -38,7 +40,7 @@ class AsyncFileManager
     /// @brief Constructor
     /// @param csv_path Path for CSV output
     /// @param parquet_path Path for Parquet output
-    /// @param trading_day Current trading day
+    /// @param trading_day Current trading day (YYYYMMDD)
     /// @param base_action_day Startup physical date
     /// @param next_action_day Next physical date
     /// @param startup_time_hms Local startup time in HH:MM:SS (used for UpdateTime filtering)
@@ -57,10 +59,15 @@ class AsyncFileManager
     AsyncFileManager(AsyncFileManager &&) = delete;
     AsyncFileManager &operator=(AsyncFileManager &&) = delete;
 
-    /// @brief Async write market data (lock-free, high-performance)
-    /// @param data Market data to write
+    /// @brief Async write compact market tick (lock-free, high-performance)
+    /// @param tick Market tick to write
     /// @return true if enqueued successfully, false if queue is full
-    bool write_market_data_async(const CThostFtdcDepthMarketDataField &data);
+    bool write_market_data_async(const MarketTick &tick);
+
+    /// @brief Async write raw CTP market data (converts to MarketTick and enqueues)
+    /// @param raw Raw CTP market data to write
+    /// @return true if enqueued successfully, false if queue is full
+    bool write_market_data_async(const CThostFtdcDepthMarketDataField &raw);
 
     /// @brief Stop the worker thread
     void stop();
@@ -92,6 +99,8 @@ class AsyncFileManager
         size_t queue_size{0};         ///< Current ingestion queue depth
         size_t parquet_queue_size{0}; ///< Rows waiting for the Parquet worker
         size_t dropped_records{0};    ///< Records dropped because the ingestion queue was full
+        size_t filtered_records{0};   ///< Records filtered out by UpdateTime window
+        size_t invalid_records{0};    ///< Records rejected due to invalid instrument ID
         size_t write_failures{0};     ///< Writer-level write failures
         size_t periodic_flushes{0};   ///< Successful periodic CSV flushes
         size_t csv_records{0};        ///< Records accepted by the CSV writer
@@ -100,14 +109,20 @@ class AsyncFileManager
     Statistics get_statistics() const;
 
   private:
+    enum class FailureSource
+    {
+        Csv,
+        Parquet
+    };
+
     void worker_loop(std::stop_token st);
 #ifdef CFMDC_ENABLE_PARQUET
     void parquet_worker_loop(std::stop_token st);
 #endif
 
-    bool process_market_data(CThostFtdcDepthMarketDataField &data) const;
-    bool write_processed_market_data(const CThostFtdcDepthMarketDataField &data);
-    void mark_write_failure(std::string_view operation, std::string_view instrument_id = {});
+    bool process_market_data(MarketTick &tick);
+    bool write_processed_market_data(const MarketTick &tick, std::stop_token st);
+    void mark_write_failure(FailureSource source, std::string_view operation, std::string_view instrument_id = {});
 
     // Configuration
     std::filesystem::path csv_path_;
@@ -128,7 +143,7 @@ class AsyncFileManager
     // Lock-free queue. CN futures peak at ~1000 ticks per 500ms snapshot slice,
     // so 16384 slots cover several seconds of full-market backlog.
     static constexpr size_t LOCKFREE_QUEUE_SIZE = 16384; // Must be power of 2
-    using MarketDataQueue = LockFreeQueue<CThostFtdcDepthMarketDataField, LOCKFREE_QUEUE_SIZE>;
+    using MarketDataQueue = LockFreeQueue<MarketTick, LOCKFREE_QUEUE_SIZE>;
     std::unique_ptr<MarketDataQueue> queue_;
 #ifdef CFMDC_ENABLE_PARQUET
     std::unique_ptr<MarketDataQueue> parquet_queue_;
@@ -141,11 +156,15 @@ class AsyncFileManager
     std::jthread parquet_worker_thread_;
 #endif
 
-    // Statistics
+    // Statistics & failure state
     std::atomic<size_t> csv_records_{0};
     std::atomic<size_t> parquet_records_{0};
+    std::atomic<size_t> filtered_records_{0};
+    std::atomic<size_t> invalid_records_{0};
     std::atomic<size_t> write_failures_{0};
     std::atomic<size_t> periodic_flushes_{0};
+    std::atomic<bool> csv_fatal_{false};
+    std::atomic<bool> parquet_fatal_{false};
     std::atomic<bool> fatal_error_{false};
 };
 

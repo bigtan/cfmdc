@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -9,7 +10,6 @@
 #include <unordered_map>
 
 #include "IMarketDataWriter.h"
-#include "ThostFtdcUserApiStruct.h"
 
 namespace cfmdc
 {
@@ -21,9 +21,11 @@ namespace cfmdc
 class CsvWriter : public IMarketDataWriter
 {
   public:
+    static constexpr size_t kStreamBufferSize = 32 * 1024;
+
     /// @brief Create CSV writer
     /// @param base_path Base directory for CSV files
-    /// @param trading_day Trading day string
+    /// @param trading_day Trading day string (YYYYMMDD)
     explicit CsvWriter(const std::filesystem::path &base_path, const std::string &trading_day);
 
     /// @brief Destructor - closes all open files
@@ -36,9 +38,9 @@ class CsvWriter : public IMarketDataWriter
     CsvWriter &operator=(CsvWriter &&) = default;
 
     /// @brief Write market data to CSV file
-    /// @param data Market data to write
+    /// @param tick Market tick data to write
     /// @return true if written successfully, false otherwise
-    bool write(const CThostFtdcDepthMarketDataField &data) override;
+    bool write(const MarketTick &tick) override;
 
     /// @brief Flush all open files
     /// @return true if every stream flushed successfully
@@ -60,6 +62,8 @@ class CsvWriter : public IMarketDataWriter
   private:
     struct FileEntry
     {
+        // Declare buffer before stream so stream flushes/closes while custom buffer is still alive.
+        std::unique_ptr<char[]> buffer;
         std::unique_ptr<std::ofstream> stream;
         bool dirty{false};
     };
@@ -81,11 +85,13 @@ class CsvWriter : public IMarketDataWriter
 
     /// @brief Write CSV header to file
     /// @param file Output stream to write header to
-    void write_csv_header(std::ofstream &file);
+    /// @return true if stream remains good after writing header
+    bool write_csv_header(std::ofstream &file);
 
     // Configuration
     std::filesystem::path base_path_;
     std::string trading_day_;
+    bool base_dir_ensured_{false};
 
     // File handles
     std::unordered_map<std::string, FileEntry, StringHash, std::equal_to<>> file_handles_;

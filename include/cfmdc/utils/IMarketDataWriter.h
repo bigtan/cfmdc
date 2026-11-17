@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ThostFtdcUserApiStruct.h"
+#include "cfmdc/types/MarketTick.h"
 
 namespace cfmdc
 {
@@ -12,9 +12,9 @@ class IMarketDataWriter
     virtual ~IMarketDataWriter() = default;
 
     /// @brief Write a single market data record
-    /// @param data Market data to write
+    /// @param tick Market data tick to write
     /// @return true if successful, false otherwise
-    virtual bool write(const CThostFtdcDepthMarketDataField &data) = 0;
+    virtual bool write(const MarketTick &tick) = 0;
 
     /// @brief Flush buffered data (if any)
     /// @return true if all buffered data was flushed successfully

@@ -5,11 +5,8 @@
 #include <filesystem>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
 #include "IMarketDataWriter.h"
-#include "ThostFtdcUserApiStruct.h"
 
 namespace cfmdc
 {
@@ -53,9 +50,9 @@ class ParquetMarketDataWriter
     ParquetMarketDataWriter &operator=(ParquetMarketDataWriter &&) = default;
 
     /// @brief Write a single market data record
-    /// @param data Market data to write
+    /// @param tick Market tick data to write
     /// @return true if successful, false otherwise
-    bool write(const CThostFtdcDepthMarketDataField &data);
+    bool write(const MarketTick &tick);
 
     /// @brief Flush buffered data to file
     void flush();
@@ -74,7 +71,7 @@ class ParquetMarketDataWriter
 
   private:
     void initialize_schema();
-    void append_to_buffer(const CThostFtdcDepthMarketDataField &data);
+    void append_to_buffer(const MarketTick &tick);
     void flush_buffer();
 
     class Impl;
@@ -92,7 +89,7 @@ class ParquetBatchWriter : public IMarketDataWriter
   public:
     /// @brief Create batch writer
     /// @param base_path Base directory for Parquet files
-    /// @param trading_day Trading day string
+    /// @param trading_day Trading day string (YYYYMMDD)
     /// @param config Writer configuration
     explicit ParquetBatchWriter(const std::filesystem::path &base_path, const std::string &trading_day,
                                 const ParquetMarketDataWriter::Config &config = ParquetMarketDataWriter::Config{});
@@ -106,9 +103,9 @@ class ParquetBatchWriter : public IMarketDataWriter
     ParquetBatchWriter &operator=(ParquetBatchWriter &&) = default;
 
     /// @brief Write market data (all instruments to single file)
-    /// @param data Market data to write
+    /// @param tick Market tick data to write
     /// @return true if successful, false otherwise
-    bool write(const CThostFtdcDepthMarketDataField &data) override;
+    bool write(const MarketTick &tick) override;
 
     /// @brief Flush writer
     /// @return true if buffered rows were flushed successfully
@@ -126,8 +123,6 @@ class ParquetBatchWriter : public IMarketDataWriter
   private:
     std::filesystem::path base_path_; ///< Base directory for all data
     std::string trading_day_;         ///< Trading day string
-    // std::filesystem::path                      trading_day_dir_;    ///<
-    // Directory for this trading day
     ParquetMarketDataWriter::Config config_;
     std::unique_ptr<ParquetMarketDataWriter> writer_;
     std::filesystem::path current_file_path_; ///< Path to current timestamped file

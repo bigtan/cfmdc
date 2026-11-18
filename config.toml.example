@@ -4,12 +4,15 @@
 # Support single server table or multiple server tables (array of tables)
 # When using multiple servers, the application will try them in order if connection fails
 #
-# Environment variable credential overrides (take precedence over TOML values when set):
+# Environment variable credential overrides (precedence: non-empty env > TOML):
 #   CFMDC_BROKER_ID -> Front.BrokerID
 #   CFMDC_USER_ID   -> Front.UserID
 #   CFMDC_PASSWORD  -> Front.Password
 #   CFMDC_AUTH_CODE -> Front.AuthCode
 #   CFMDC_APP_ID    -> Front.AppID
+# When an environment variable is set to a non-empty (non-whitespace) value, it overrides
+# the corresponding field in [Front] / [[Front]], and that TOML field may be omitted or "".
+# When an environment variable is unset or blank, loading falls back to the TOML value.
 
 # Example 1: Single server (backward compatible)
 # [Front]

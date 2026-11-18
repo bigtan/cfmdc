@@ -72,8 +72,9 @@ std::optional<std::string> read_non_empty_env(const char *name)
     std::string value(raw);
 #endif
 
-    if (value.empty())
+    if (value.empty() || std::ranges::all_of(value, [](unsigned char c) { return std::isspace(c) != 0; }))
     {
+        scrub_string(value);
         return std::nullopt;
     }
     return value;

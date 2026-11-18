@@ -13,8 +13,11 @@ namespace cfmdc
 {
 
 /// @brief Configuration manager for CTP market data collector
-/// @details Eagerly loads and validates configuration from TOML file into typed members
-///          Supports both single and multiple front servers and env-var credential overrides
+/// @details Eagerly loads and validates configuration from TOML file into typed members.
+///          Supports both single ([Front]) and multiple ([[Front]]) front servers and
+///          environment-variable credential overrides (non-empty, non-whitespace env vars
+///          take precedence over TOML values; when set, the corresponding TOML key may be
+///          omitted or empty, and when unset or blank, loading falls back to TOML).
 /// @thread_safety Not thread-safe. Should be initialized once at startup.
 class Config
 {

@@ -314,6 +314,40 @@ TEST_CASE("Config supports environment variable credential overrides", "[config]
     env_guard.unset("CFMDC_AUTH_CODE");
     env_guard.unset("CFMDC_APP_ID");
 
+    SECTION("Non-empty environment variables override non-empty TOML values")
+    {
+        TempConfigFile test_config(R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "toml_broker"
+UserID = "toml_user"
+Password = "toml_password"
+UserProductInfo = "test_product"
+AuthCode = "toml_auth"
+AppID = "toml_app"
+
+[History]
+CSVPath = "./data/csv"
+StorageMode = "CSV"
+)");
+
+        env_guard.set("CFMDC_BROKER_ID", "env_broker");
+        env_guard.set("CFMDC_USER_ID", "env_user");
+        env_guard.set("CFMDC_PASSWORD", "env_password");
+        env_guard.set("CFMDC_AUTH_CODE", "env_auth");
+        env_guard.set("CFMDC_APP_ID", "env_app");
+
+        Config config(test_config.path_string());
+        REQUIRE(config.front_servers().size() == 1);
+        const auto &server = config.front_servers()[0];
+        REQUIRE(server.broker_id() == "env_broker");
+        REQUIRE(server.user_id() == "env_user");
+        REQUIRE(server.password() == "env_password");
+        REQUIRE(server.auth_code() == "env_auth");
+        REQUIRE(server.app_id() == "env_app");
+    }
+
     SECTION("Overrides allow TOML to omit or leave empty overridden credential fields")
     {
         TempConfigFile test_config(R"(
@@ -343,6 +377,86 @@ StorageMode = "CSV"
         REQUIRE(server.password() == "env_secret_pw");
         REQUIRE(server.auth_code() == "env_auth");
         REQUIRE(server.app_id() == "env_app");
+    }
+
+    SECTION("Missing or blank environment variables fall back to TOML values")
+    {
+        TempConfigFile test_config(R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "toml_broker"
+UserID = "toml_user"
+Password = "toml_password"
+UserProductInfo = "test_product"
+AuthCode = "toml_auth"
+AppID = "toml_app"
+
+[History]
+CSVPath = "./data/csv"
+StorageMode = "CSV"
+)");
+
+        // All env vars unset -> fallback to TOML
+        Config config_unset(test_config.path_string());
+        REQUIRE(config_unset.front_servers().size() == 1);
+        REQUIRE(config_unset.front_servers()[0].broker_id() == "toml_broker");
+        REQUIRE(config_unset.front_servers()[0].user_id() == "toml_user");
+        REQUIRE(config_unset.front_servers()[0].password() == "toml_password");
+        REQUIRE(config_unset.front_servers()[0].auth_code() == "toml_auth");
+        REQUIRE(config_unset.front_servers()[0].app_id() == "toml_app");
+
+        // Whitespace-only env vars -> treated as blank, fallback to TOML
+        env_guard.set("CFMDC_BROKER_ID", "   ");
+        env_guard.set("CFMDC_USER_ID", "\t ");
+        env_guard.set("CFMDC_PASSWORD", "  \t");
+        env_guard.set("CFMDC_AUTH_CODE", " ");
+        env_guard.set("CFMDC_APP_ID", "\n");
+
+        Config config_blank(test_config.path_string());
+        REQUIRE(config_blank.front_servers().size() == 1);
+        REQUIRE(config_blank.front_servers()[0].broker_id() == "toml_broker");
+        REQUIRE(config_blank.front_servers()[0].user_id() == "toml_user");
+        REQUIRE(config_blank.front_servers()[0].password() == "toml_password");
+        REQUIRE(config_blank.front_servers()[0].auth_code() == "toml_auth");
+        REQUIRE(config_blank.front_servers()[0].app_id() == "toml_app");
+    }
+
+    SECTION("Missing or empty TOML credential fails when environment variable is unset or blank")
+    {
+        TempConfigFile omitted_cfg(R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "toml_user"
+UserProductInfo = "test_product"
+AuthCode = "toml_auth"
+AppID = "toml_app"
+
+[History]
+CSVPath = "./data/csv"
+StorageMode = "CSV"
+)");
+        REQUIRE_THROWS_AS(Config(omitted_cfg.path_string()), ConfigException);
+
+        TempConfigFile empty_cfg(R"(
+[Front]
+MD_Url = "tcp://test.com:10131"
+TD_Url = "tcp://test.com:10130"
+BrokerID = "9999"
+UserID = "toml_user"
+Password = ""
+UserProductInfo = "test_product"
+AuthCode = "toml_auth"
+AppID = "toml_app"
+
+[History]
+CSVPath = "./data/csv"
+StorageMode = "CSV"
+)");
+        env_guard.set("CFMDC_PASSWORD", "   ");
+        REQUIRE_THROWS_AS(Config(empty_cfg.path_string()), ConfigException);
     }
 
     SECTION("Overrides apply across all Front entries before validation and account consistency checks")
